@@ -18,7 +18,6 @@ from rag_vie.features.vietnamese import extract_features
 from rag_vie.fusion.mlp import FusionMLP
 from rag_vie.retrieval.bm25 import BM25Retriever
 from rag_vie.retrieval.dense import DenseRetriever
-from rag_vie.retrieval.sparse import SparseRetriever
 from rag_vie.retrieval.hybrid import HybridRetriever
 
 
@@ -48,7 +47,7 @@ def evaluate(
     hybrid: HybridRetriever,
     mlp: FusionMLP,
     qas: list[dict],
-    fixed_weights: tuple[float, float, float] | None = None,
+    fixed_weights: tuple[float, float] | None = None,
 ) -> dict[str, float]:
     ndcg_scores, mrr_scores, recall_scores = [], [], []
 
@@ -67,7 +66,6 @@ def evaluate(
             weights=weights,
             k_dense=settings.top_k_dense,
             k_bm25=settings.top_k_bm25,
-            k_sparse=settings.top_k_sparse,
             k_final=100,
         )
         retrieved_ids = [pid for pid, _, _ in hits]
@@ -94,20 +92,18 @@ def main() -> None:
     args = parser.parse_args()
 
     bm25_path = args.bm25_path or str(Path(args.index_dir) / "bm25.pkl")
-    sparse_path = str(Path(args.index_dir) / "sparse.pkl")
 
     dense = DenseRetriever.load(args.index_dir)
     bm25 = BM25Retriever.load(bm25_path)
-    sparse = SparseRetriever.load(sparse_path)
-    hybrid = HybridRetriever(dense, bm25, sparse)
+    hybrid = HybridRetriever(dense, bm25)
 
     mlp = FusionMLP.load(args.mlp_path) if args.mlp_path else FusionMLP()
 
     fixed_weights = None
     if args.fixed_weights:
         parts = list(map(float, args.fixed_weights.split(",")))
-        assert len(parts) == 3, "--fixed-weights cần đúng 3 giá trị, ví dụ: 0.4,0.3,0.3"
-        fixed_weights = (parts[0], parts[1], parts[2])
+        assert len(parts) == 2, "--fixed-weights cần đúng 2 giá trị, ví dụ: 0.5,0.5"
+        fixed_weights = (parts[0], parts[1])
 
     with open(args.qas_path, encoding="utf-8") as f:
         qas = [json.loads(line) for line in f]

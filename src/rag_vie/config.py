@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     # Retrieval
     top_k_dense: int = 100
     top_k_bm25: int = 100
-    top_k_sparse: int = 100
     top_k_final: int = 10
     embedding_dim: int = 1024
 

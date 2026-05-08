@@ -10,12 +10,12 @@ _INPUT_DIM = len(FEATURE_NAMES)
 
 
 class FusionMLP(nn.Module):
-    """Lightweight MLP that predicts three-way fusion weights.
+    """Lightweight MLP that predicts two-way fusion weights.
     Input: Vietnamese-aware feature vector (dim = len(FEATURE_NAMES))
-    Output: 3-dim softmax → (w_dense, w_bm25, w_sparse)
+    Output: 2-dim softmax → (w_dense, w_bm25)
     """
 
-    def __init__(self, input_dim: int = _INPUT_DIM, output_dim: int = 3) -> None:
+    def __init__(self, input_dim: int = _INPUT_DIM, output_dim: int = 2) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, 64),

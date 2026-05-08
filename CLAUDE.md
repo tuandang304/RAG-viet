@@ -61,20 +61,18 @@ Query
                           └─ top-10 → Qwen3:32B generator → answer
 ```
 
-**Ba tín hiệu retrieval:**
+**Hai tín hiệu retrieval:**
 | Signal | Nguồn | Đặc điểm |
 |---|---|---|
-| `s_dense` | FPT Vietnamese_Embedding → FAISS | Semantic similarity |
-| `s_bm25` | underthesea + BM25Okapi | Classic term frequency |
-| `s_sparse` | BGE-M3 lexical weights (SPLADE-style) | Learned sparse, khác BM25 |
+| `s_dense` | FPT Vietnamese_Embedding → FAISS (1024-dim, L2-norm, Inner Product) | Semantic similarity |
+| `s_bm25` | underthesea word segmentation + BM25Okapi | Classic term frequency |
 
-**Cả ba tín hiệu đều dùng FPT AI Factory API** — không có model local.  
-- Dense: `POST {FPT_BASE_URL}/embeddings`  
-- Sparse: `POST {FPT_BASE_URL}/embed_sparse`  
-- LLM: `POST {FPT_BASE_URL}/chat/completions`  
+**API calls:**
+- Dense embedding: `POST {FPT_BASE_URL}/embeddings`
+- LLM generation: `POST {FPT_BASE_URL}/chat/completions`
 
-**Fusion weights** `(a, b, c) = softmax(MLP(features))` — MLP nhỏ (~2,700 params), dự đoán động theo từng query.  
-Khi MLP chưa train, weights ≈ `(0.33, 0.33, 0.33)`.
+**Fusion weights** `(a, b) = softmax(MLP(features))` — MLP nhỏ (~2,660 params), dự đoán động theo từng query.  
+Khi MLP chưa train, weights ≈ `(0.5, 0.5)`.
 
 ---
 
@@ -115,11 +113,12 @@ Tất cả dataset chuẩn hoá về JSONL, mỗi dòng là một JSON object.
 ```
 
 **Datasets:**
-| Dataset | Domain | Split dùng |
-|---|---|---|
-| UIT-ViQuAD 2.0 | Wikipedia | Train MLP + in-domain test |
-| VIMQA | Wikipedia (multi-hop) | Zero-shot test |
-| ViNewsQA | Tin tức VnExpress | Zero-shot test (cross-domain) |
+| Dataset | HF ID | Domain | Split dùng |
+|---|---|---|---|
+| UIT-ViQuAD 2.0 | `taidng/UIT-ViQuAD2.0` | Wikipedia | Train MLP + in-domain test |
+| DANGDOCAO | `DANGDOCAO/GeneratingQuestions` | Pháp lý / Hành chính (736 sub-domain) | Zero-shot cross-domain test |
+
+Tải dataset: `uv run python scripts/download_data.py`
 
 ---
 
@@ -159,6 +158,12 @@ uv run python scripts/evaluate.py \
   --qas-path data/processed/viaquad_dev.jsonl \
   --index-dir indexes/viaquad \
   --fixed-weights 0.0,1.0,0.0
+
+# Cross-domain zero-shot (train ViQuAD → test DANGDOCAO)
+uv run python scripts/evaluate.py \
+  --qas-path data/processed/dangdocao_test.jsonl \
+  --index-dir indexes/dangdocao \
+  --mlp-path checkpoints/fusion_mlp.pt
 ```
 
 ---
@@ -184,5 +189,5 @@ Baseline cần vượt (theo thứ tự khó tăng dần):
 - BM25 score không có upper bound → bắt buộc min-max normalize trước khi fuse với dense score.
 - underthesea `word_tokenize(text, format="text")` trả về string với từ ghép nối bằng `_` (ví dụ: `học_sinh`).
 - MLP `output_dim=3` cho three-way fusion `(a, b, c)` → `(w_dense, w_bm25, w_sparse)`.
-- `SparseRetriever` gọi FPT endpoint `{FPT_BASE_URL}/embed_sparse`. Nếu FPT dùng format response khác, chỉnh hàm `_parse_sparse_response()` trong `retrieval/sparse.py`.
-- Sparse inverted index lưu dạng `dict[token_id, list[(doc_id, weight)]]` — với corpus ~100K doc chiếm khoảng 2-4GB RAM. Nếu quá lớn, cắt bớt top-k token per doc khi build.
+- `retrieval/sparse.py` tồn tại nhưng không dùng trong pipeline hiện tại (FPT không expose `/embed_sparse`).
+- Scores từ dense và BM25 đều được min-max normalize trước khi fuse — quan trọng vì BM25 không có upper bound.

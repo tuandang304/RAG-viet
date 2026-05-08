@@ -148,27 +148,27 @@ Thêm nhóm này có hai tác dụng. Một là tăng khả năng MLP học đư
 
 ## 6. Setup thực nghiệm (replaces §7)
 
-### 6.1. Ba dataset, ba vai trò khác nhau
-
-Việc ba dataset khác nhau rõ ràng về tính chất là **tài sản** chứ không phải gánh nặng — chúng tự cấu thành một bộ test cross-domain mà không cần phải tự chế. Tập trung vào General (Wikipedia) làm core, ViNewsQA làm bước domain shift tự nhiên.
+### 6.1. Hai dataset, hai vai trò rõ ràng
 
 | Dataset | Domain | Đặc điểm câu hỏi | Vai trò trong evaluation |
 |---|---|---|---|
-| UIT-ViQuAD 2.0 | General (Wikipedia) | Single-hop, factual, SQuAD-style; ~23K QA pairs, chất lượng cao, human-annotated | Train chính + in-domain test |
-| VIMQA | General (Wikipedia) | Multi-hop reasoning, cần tổng hợp nhiều đoạn văn; ~20K QA pairs | Test khả năng xử lý query phức tạp |
-| ViNewsQA | Tin tức (VnExpress) | Single-hop nhưng ngữ cảnh báo chí, khác phong cách Wikipedia; ~22K QA pairs | Test cross-domain shift (Wikipedia → News) |
+| **UIT-ViQuAD 2.0** | General (Wikipedia) | Single-hop, factual, SQuAD-style; 39.6K QA pairs (train 28K / dev 3.8K / test 7.3K), human-annotated, có ~12K unanswerable questions | Train chính + in-domain test |
+| **DANGDOCAO/GeneratingQuestions** | Pháp lý / Hành chính / Giáo dục | FAQ-style, thuật ngữ pháp lý đặc thù, 43.9K QA pairs, 736 sub-domain; chia 80/10/10 | Zero-shot cross-domain test (Wikipedia → Legal/Admin) |
 
-> **Lý do bỏ ViHealthQA và XLMRQA:**  
-> - *ViHealthQA*: Domain y tế quá xa General Wikipedia, làm lệch câu chuyện nghiên cứu; kết quả sẽ khó giải thích vì terminology gap quá lớn.  
-> - *XLMRQA*: Là bản dịch máy, chất lượng không đồng đều, có thể tạo artifact giả tạo trong kết quả. Với mục tiêu Q3 journal, một bộ dữ liệu dịch máy không annotated thủ công sẽ bị reviewer chất vấn.
+> **Lý do chọn DANGDOCAO thay ViNewsQA/VIMQA:**  
+> - *ViNewsQA & VIMQA* yêu cầu ký user agreement, không tải tự động được — không đảm bảo reproducibility cho paper.  
+> - *DANGDOCAO* tải trực tiếp qua HuggingFace, license rõ ràng, domain shift mạnh (Wikipedia → pháp lý) tạo thử thách rõ ràng cho retrieval model, 736 sub-domain cho phép per-domain breakdown analysis sâu hơn VIMQA.
+
+> **Lý do giảm từ 3 xuống 2 dataset:**  
+> Với Q3 journal, 2 dataset với phân tích sâu (ablation đầy đủ, per-domain breakdown, diacritic robustness) thuyết phục hơn 3 dataset với phân tích mỏng. Cross-domain shift Wikipedia → pháp lý là đủ rõ ràng và khó để reviewer đặt câu hỏi về tính hợp lệ.
 
 ### 6.2. Hai protocol đánh giá
 
 **Protocol 1 — In-domain:** Train và test trên cùng một dataset. Cho mỗi dataset một bảng kết quả riêng.
 
-**Protocol 2 — Cross-domain (đóng góp chính):** Train MLP **chỉ trên UIT-ViQuAD 2.0**, sau đó zero-shot evaluate trên VIMQA và ViNewsQA. Đây là phép kiểm tra tương đương với BEIR trong proposal gốc, và là phần mà reviewer sẽ tìm.
+**Protocol 2 — Cross-domain (đóng góp chính):** Train MLP **chỉ trên UIT-ViQuAD 2.0**, sau đó zero-shot evaluate trên **DANGDOCAO test split**. Đây là phép kiểm tra tương đương với BEIR trong proposal gốc, và là phần mà reviewer sẽ tìm.
 
-Lý do split như vậy: UIT-ViQuAD 2.0 lớn nhất, cấu trúc gần SQuAD nhất, và là dataset general-domain nên train trên đó rồi test các domain khác là setup logic. VIMQA kiểm tra khả năng xử lý query phức tạp hơn, ViNewsQA kiểm tra domain shift nhẹ (Wikipedia → news). Nếu MLP chỉ tốt khi train + test cùng dataset, nó có thể chỉ là overfit trên distribution đó.
+Lý do: UIT-ViQuAD 2.0 là general Wikipedia domain, DANGDOCAO là pháp lý/hành chính — domain shift mạnh, vocabulary gap lớn. Nếu dynamic fusion vẫn tốt hơn fixed-weight trên DANGDOCAO, đó là bằng chứng về khả năng generalize thực sự của MLP. Thêm vào đó, 736 sub-domain của DANGDOCAO cho phép phân tích chi tiết: sub-domain nào dynamic fusion có lợi nhiều nhất.
 
 ### 6.3. Baselines
 
@@ -224,7 +224,7 @@ Giả định: một sinh viên làm 15-20 giờ/tuần, có một GPU 24GB (ho�
 
 | Tuần | Việc | Deliverable cuối tuần |
 |---|---|---|
-| 1 | Setup môi trường, tải **ba dataset** (UIT-ViQuAD 2.0, VIMQA, ViNewsQA), chuẩn hóa format chung | Ba dataset cùng schema: `{id, question, context, answer}` |
+| 1 | Setup môi trường, tải **hai dataset** (UIT-ViQuAD 2.0, DANGDOCAO) bằng `scripts/download_data.py` | Hai dataset cùng schema: `{id, question, relevant_ids, answers}` |
 | 2 | Build BM25 index với VnCoreNLP tokenizer, build dense index với Vietnamese_Embedding | Hai retriever chạy được, NDCG@10 riêng từng nguồn trên ViQuAD dev |
 | 3 | Implement BGE-M3 multi-head extraction + fixed-weight hybrid baseline | Baseline #1–#5 có số trên UIT-ViQuAD 2.0 dev |
 | 4 | Implement feature extractor (chuẩn + Vietnamese-aware) và MLP | MLP chạy được, training loop chạy 1 epoch không lỗi |
@@ -251,8 +251,8 @@ Bốn rủi ro của proposal gốc vẫn áp dụng. Bổ sung thêm:
 **Rủi ro 7: BGE-M3 multi-vector chậm trên corpus lớn.**
 → Giới hạn re-ranking multi-vector ở top-100 sau dense retrieval, không scoring trên toàn corpus. Đây cũng là cách dùng tiêu chuẩn của BGE-M3, không phải workaround đặc biệt.
 
-**Rủi ro 8: ViNewsQA có phong cách câu hỏi khác biệt đáng kể so với UIT-ViQuAD 2.0.**
-→ Báo chí thường dùng câu hỏi ngắn, ngôn ngữ thông tục, bối cảnh thời sự. Nếu MLP train trên ViQuAD không generalize sang ViNewsQA, đây là **kết quả đáng báo cáo** chứ không phải thất bại — nó chứng minh rằng dynamic fusion cần training data phù hợp domain. Đưa phân tích này vào phần Limitations/Future Work.
+**Rủi ro 8: DANGDOCAO có phong cách câu hỏi FAQ rất khác so với UIT-ViQuAD 2.0.**
+→ FAQ pháp lý thường có câu hỏi dạng "Điều kiện để X là gì?", thuật ngữ văn bản quy phạm pháp luật, context dài và phức tạp. Nếu MLP train trên ViQuAD không generalize sang DANGDOCAO, đây là **kết quả đáng báo cáo** chứ không phải thất bại — nó chứng minh rằng domain gap thật sự ảnh hưởng đến dynamic fusion. Phân tích per-sub-domain sẽ chỉ ra được sub-domain nào khó nhất.
 
 **Rủi ro 9: BGE-M3 native hybrid đã quá mạnh, dynamic fusion không vượt được nhiều.**
 → Đây là rủi ro thật. Mitigation: (a) đảm bảo Vietnamese-aware features đủ phong phú để có nguồn tín hiệu mà BGE-M3 native không có; (b) nếu gain tổng nhỏ, vẫn có thể bán câu chuyện qua phân tích — ví dụ "gain nhỏ trên trung bình, lớn trên query thiếu dấu/multi-hop".
