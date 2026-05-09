@@ -34,7 +34,6 @@ Copy `.env.example` → `.env` và điền:
 | `FPT_API_KEY` | API key từ FPT AI Factory dashboard |
 | `FPT_BASE_URL` | Base URL của FPT AI Factory (OpenAI-compatible) |
 | `FPT_EMBEDDING_MODEL` | Tên model embedding dense trên FPT |
-| `FPT_SPARSE_MODEL` | Tên model cho sparse endpoint (thường giống `FPT_EMBEDDING_MODEL`) |
 | `FPT_LLM_MODEL` | Tên LLM trên FPT (mặc định: `Qwen3-32B`) |
 
 `.env` đã được `.gitignore` — không commit lên git.
@@ -61,18 +60,20 @@ Query
                           └─ top-10 → Qwen3:32B generator → answer
 ```
 
-**Hai tín hiệu retrieval:**
+**Ba tín hiệu retrieval:**
 | Signal | Nguồn | Đặc điểm |
 |---|---|---|
 | `s_dense` | FPT Vietnamese_Embedding → FAISS (1024-dim, L2-norm, Inner Product) | Semantic similarity |
 | `s_bm25` | underthesea word segmentation + BM25Okapi | Classic term frequency |
+| `s_sparse` | BGE-M3 (local, BAAI/bge-m3) → inverted index (lexical weights) | Learned sparse retrieval |
 
 **API calls:**
 - Dense embedding: `POST {FPT_BASE_URL}/embeddings`
 - LLM generation: `POST {FPT_BASE_URL}/chat/completions`
+- Sparse: local inference only (BGE-M3 via FlagEmbedding, ~570 MB download on first run)
 
-**Fusion weights** `(a, b) = softmax(MLP(features))` — MLP nhỏ (~2,660 params), dự đoán động theo từng query.  
-Khi MLP chưa train, weights ≈ `(0.5, 0.5)`.
+**Fusion weights** `(a, b, c) = softmax(MLP(features))` — MLP nhỏ (~2,660 params), dự đoán động theo từng query.  
+Khi MLP chưa train, weights ≈ `(0.33, 0.33, 0.33)`.
 
 ---
 
@@ -133,52 +134,50 @@ uv run python scripts/build_index.py \
 # Lần đầu sẽ download BAAI/bge-m3 (~570MB)
 ```
 
-**Evaluate** (so sánh các baseline):
+**Evaluate** (so sánh các baseline — tất cả trong một lệnh):
 ```bash
-# Dynamic MLP (3-way)
-uv run python scripts/evaluate.py \
+# Dynamic MLP (3-way) + tất cả baselines
+uv run python scripts/evaluate_all.py \
   --qas-path data/processed/viaquad_dev.jsonl \
   --index-dir indexes/viaquad \
-  --mlp-path checkpoints/fusion_mlp.pt
-
-# Fixed weight đều (1/3 mỗi tín hiệu)
-uv run python scripts/evaluate.py \
-  --qas-path data/processed/viaquad_dev.jsonl \
-  --index-dir indexes/viaquad \
-  --fixed-weights 0.33,0.33,0.34
-
-# Dense only
-uv run python scripts/evaluate.py \
-  --qas-path data/processed/viaquad_dev.jsonl \
-  --index-dir indexes/viaquad \
-  --fixed-weights 1.0,0.0,0.0
-
-# BM25 only
-uv run python scripts/evaluate.py \
-  --qas-path data/processed/viaquad_dev.jsonl \
-  --index-dir indexes/viaquad \
-  --fixed-weights 0.0,1.0,0.0
+  --mlp-path checkpoints/fusion_mlp_3way.pt \
+  --output results/viaquad_dev.json
 
 # Cross-domain zero-shot (train ViQuAD → test DANGDOCAO)
-uv run python scripts/evaluate.py \
+uv run python scripts/evaluate_all.py \
   --qas-path data/processed/dangdocao_test.jsonl \
   --index-dir indexes/dangdocao \
-  --mlp-path checkpoints/fusion_mlp.pt
+  --mlp-path checkpoints/fusion_mlp_3way.pt \
+  --output results/dangdocao_test.json
+
+# Không có sparse index (2-way fallback)
+uv run python scripts/evaluate_all.py \
+  --qas-path data/processed/viaquad_dev.jsonl \
+  --index-dir indexes/viaquad \
+  --no-sparse
 ```
+
+Methods được evaluate: `mlp`, `fixed_equal` (1/3,1/3,1/3), `dense_bm25` (0.5,0.5,0), `dense`, `bm25`, `sparse`.
 
 ---
 
 ## Metrics
 
-`evaluate.py` trả về **NDCG@10**, **MRR@10**, **Recall@100**.  
+`evaluate_all.py` trả về 4 nhóm metrics:
+1. **Retrieval quality**: NDCG@10, MRR@10, MAP@10, Recall@10, Recall@100, Hit@1
+2. **Statistical significance**: Paired t-test + Wilcoxon, 95% bootstrap CI (2000 resamples)
+3. **Efficiency**: Latency p50/p95, throughput (q/s)
+4. **Weight interpretability**: Entropy H, Pearson correlations (diacritic↔w_dense, compound↔w_bm25, english↔w_sparse), stratified analysis (11 strata)
+
 Kết quả lưu vào `results/` dạng JSON khi truyền `--output`.
 
 Baseline cần vượt (theo thứ tự khó tăng dần):
-1. BM25 only (`--fixed-weights 0.0,1.0`)
-2. Dense only (`--fixed-weights 1.0,0.0`)
-3. Fixed hybrid `0.5,0.5`
-4. Best fixed-weight (tune trên dev set)
-5. Dynamic MLP ← đây là contribution chính
+1. BM25 only
+2. Dense only
+3. Sparse only (BGE-M3)
+4. Fixed hybrid equal (1/3, 1/3, 1/3)
+5. Best fixed-weight (tune trên dev set)
+6. Dynamic MLP ← đây là contribution chính
 
 ---
 
@@ -189,5 +188,7 @@ Baseline cần vượt (theo thứ tự khó tăng dần):
 - BM25 score không có upper bound → bắt buộc min-max normalize trước khi fuse với dense score.
 - underthesea `word_tokenize(text, format="text")` trả về string với từ ghép nối bằng `_` (ví dụ: `học_sinh`).
 - MLP `output_dim=3` cho three-way fusion `(a, b, c)` → `(w_dense, w_bm25, w_sparse)`.
-- `retrieval/sparse.py` tồn tại nhưng không dùng trong pipeline hiện tại (FPT không expose `/embed_sparse`).
-- Scores từ dense và BM25 đều được min-max normalize trước khi fuse — quan trọng vì BM25 không có upper bound.
+- `retrieval/sparse.py` dùng BGE-M3 local (BAAI/bge-m3 qua FlagEmbedding) — **không** phải FPT API. Lần đầu chạy sẽ download ~570 MB.
+- OMP deadlock trên macOS (FAISS + PyTorch): luôn set `KMP_DUPLICATE_LIB_OK=TRUE` và khởi tạo PyTorch (BGE-M3) **trước** FAISS.
+- Scores từ dense, BM25, và sparse đều được min-max normalize trước khi fuse — quan trọng vì BM25/sparse không có upper bound.
+- Train MLP mới: `uv run python scripts/train_mlp.py --output checkpoints/fusion_mlp_3way.pt --emb-cache checkpoints/train_embeddings.npy`
