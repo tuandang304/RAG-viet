@@ -1,95 +1,80 @@
+"""BGE-M3 sparse (lexical) retriever — local model, inverted index.
+
+Uses FlagEmbedding BGEM3FlagModel to compute SPLADE-style lexical weights.
+Model is downloaded once (~570 MB) and cached by HuggingFace hub.
+"""
+
 import pickle
 from pathlib import Path
 
-import httpx
-
-from ..config import settings
-
-# Timeout riêng cho sparse vì corpus lớn có thể chậm hơn dense
-_TIMEOUT = httpx.Timeout(120.0)
+_MODEL_NAME = "BAAI/bge-m3"
+_model = None   # lazy singleton — loaded on first call
 
 
-def _call_sparse_api(texts: list[str]) -> list[dict[int, float]]:
-    """Gọi FPT AI Factory để lấy BGE-M3 sparse (lexical) weights.
-
-    FPT trả về danh sách sparse vector, mỗi vector là list of {index, value}.
-    Endpoint: POST {base_url}/embed_sparse
-    Body:     {"model": "...", "input": ["text1", ...]}
-    Response: {"data": [{"sparse_embedding": [{"index": 123, "value": 0.5}, ...]}, ...]}
-
-    Nếu FPT dùng format khác, chỉnh hàm _parse_sparse_response() bên dưới.
-    """
-    url = settings.fpt_base_url.rstrip("/") + "/embed_sparse"
-    headers = {
-        "Authorization": f"Bearer {settings.fpt_api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {"model": settings.fpt_sparse_model, "input": texts}
-
-    response = httpx.post(url, json=payload, headers=headers, timeout=_TIMEOUT)
-    response.raise_for_status()
-    return _parse_sparse_response(response.json())
+def _get_model():
+    global _model
+    if _model is None:
+        from FlagEmbedding import BGEM3FlagModel
+        _model = BGEM3FlagModel(_MODEL_NAME, use_fp16=True)
+    return _model
 
 
-def _parse_sparse_response(body: dict) -> list[dict[int, float]]:
-    """Chuyển response JSON của FPT sang list[dict[token_id, weight]].
-
-    Hỗ trợ hai format phổ biến:
-    - Format A (TEI-style):  data[i]["sparse_embedding"] = [{"index": int, "value": float}, ...]
-    - Format B (dict-style): data[i]["sparse_embedding"] = {"123": 0.5, "456": 0.3, ...}
-    """
-    results: list[dict[int, float]] = []
-    for item in body["data"]:
-        raw = item["sparse_embedding"]
-        if isinstance(raw, list):
-            # Format A
-            vec = {int(entry["index"]): float(entry["value"]) for entry in raw}
-        else:
-            # Format B
-            vec = {int(k): float(v) for k, v in raw.items()}
-        results.append(vec)
-    return results
+def _encode_sparse(texts: list[str], batch_size: int = 32) -> list[dict[str, float]]:
+    """Return list of lexical weight dicts: [{token_string: weight, ...}]."""
+    model = _get_model()
+    all_weights: list[dict[str, float]] = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        out = model.encode(
+            batch,
+            return_dense=False,
+            return_sparse=True,
+            return_colbert_vecs=False,
+        )
+        all_weights.extend(out["lexical_weights"])
+    return all_weights
 
 
 class SparseRetriever:
-    """BGE-M3 sparse lexical retriever — tín hiệu từ FPT AI Factory API.
-
-    Dùng learned sparse weights (SPLADE-style) từ BGE-M3, khác với BM25 ở chỗ
-    token weights được học từ mô hình thay vì tính theo TF-IDF.
-    """
+    """BGE-M3 lexical sparse retriever — inverted index over token-level weights."""
 
     def __init__(self) -> None:
-        self._inverted_index: dict[int, list[tuple[str, float]]] = {}
+        self._inverted_index: dict[str, list[tuple[str, float]]] = {}
         self._passage_map: dict[str, str] = {}
 
     def build(self, passages: list[str], ids: list[str], batch_size: int = 32) -> None:
+        from tqdm import tqdm
+
         self._inverted_index = {}
         self._passage_map = dict(zip(ids, passages))
 
-        for i in range(0, len(passages), batch_size):
-            batch_passages = passages[i : i + batch_size]
+        for i in tqdm(range(0, len(passages), batch_size), desc="  Sparse index"):
+            batch = passages[i : i + batch_size]
             batch_ids = ids[i : i + batch_size]
-            sparse_vecs = _call_sparse_api(batch_passages)
-            for doc_id, sparse_vec in zip(batch_ids, sparse_vecs):
-                for token_id, weight in sparse_vec.items():
-                    self._inverted_index.setdefault(token_id, []).append((doc_id, float(weight)))
+            vecs = _encode_sparse(batch, batch_size=batch_size)
+            for doc_id, vec in zip(batch_ids, vecs):
+                for token, weight in vec.items():
+                    if weight > 0:
+                        self._inverted_index.setdefault(token, []).append(
+                            (doc_id, float(weight))
+                        )
 
     def search(self, query: str, k: int) -> list[tuple[str, str, float]]:
         """Returns list of (id, passage, score)."""
-        query_vecs = _call_sparse_api([query])
-        query_vec = query_vecs[0]
-
+        query_vec = _encode_sparse([query])[0]
         scores: dict[str, float] = {}
-        for token_id, q_weight in query_vec.items():
-            for doc_id, d_weight in self._inverted_index.get(token_id, []):
-                scores[doc_id] = scores.get(doc_id, 0.0) + q_weight * d_weight
+        for token, q_w in query_vec.items():
+            for doc_id, d_w in self._inverted_index.get(token, []):
+                scores[doc_id] = scores.get(doc_id, 0.0) + q_w * d_w
 
         top_k = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k]
-        return [(pid, self._passage_map[pid], score) for pid, score in top_k]
+        return [(pid, self._passage_map[pid], s) for pid, s in top_k]
 
     def save(self, path: str | Path) -> None:
         with open(path, "wb") as f:
-            pickle.dump({"index": self._inverted_index, "passages": self._passage_map}, f)
+            pickle.dump(
+                {"index": self._inverted_index, "passages": self._passage_map}, f
+            )
 
     @classmethod
     def load(cls, path: str | Path) -> "SparseRetriever":
