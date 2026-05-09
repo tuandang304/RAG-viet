@@ -20,6 +20,7 @@ dependencies = [
     "httpx>=0.28.0",
     "ragas>=0.4.3",
     "langchain-openai>=1.2.1",
+    "FlagEmbedding>=1.2.11",
 ]
 
 [project.scripts]

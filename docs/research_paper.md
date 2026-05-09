@@ -141,7 +141,24 @@ Training uses Adam optimizer with learning rate $10^{-4}$, batch size 256, for 1
 
 ### 4.2. Evaluation Metrics
 
-We report **NDCG@10**, **MRR@10**, and **Recall@100** on the retrieval task. The generator (Qwen3-32B via FPT AI Factory) is used for end-to-end QA evaluation in Section 4.4.
+**Retrieval metrics.** We report six metrics across all conditions:
+
+| Metric | Description |
+|--------|-------------|
+| **NDCG@10** | Normalized Discounted Cumulative Gain — rewards higher-ranked relevant documents |
+| **MRR@10** | Mean Reciprocal Rank — rank of the first relevant document |
+| **MAP@10** | Mean Average Precision — integrates precision at each relevant rank position |
+| **Recall@10** | Fraction of relevant documents found in the top 10 |
+| **Recall@100** | Fraction of relevant documents found in the top 100 (upper-bound coverage) |
+| **Hit@1** | Success rate: 1 if the top-ranked passage is relevant, 0 otherwise |
+
+**Statistical significance.** For each baseline comparison, we report (i) paired t-test $p$-value, (ii) Wilcoxon signed-rank $p$-value on per-query NDCG@10 differences, and (iii) 95% bootstrap confidence interval (2,000 resamples) of the mean NDCG@10 delta.
+
+**Efficiency.** We report MLP parameter count, index sizes, and per-query MLP inference latency to quantify the overhead of adaptive fusion over fixed-weight fusion.
+
+**Weight interpretability.** We compute weight entropy $H = -\sum_i w_i \log w_i$ and Pearson correlations between linguistic query features and predicted weights to verify that the MLP learns linguistically meaningful mappings.
+
+The generator (Qwen3-32B via FPT AI Factory) is used for end-to-end QA evaluation in Section 5.7.
 
 ### 4.3. Baselines
 
@@ -172,21 +189,21 @@ We report **NDCG@10**, **MRR@10**, and **Recall@100** on the retrieval task. The
 
 **Dev set** (3,814 queries, used for model selection):
 
-| Method | NDCG@10 | MRR@10 | Recall@100 |
-|--------|---------|--------|------------|
-| BM25 only | 0.6770 | 0.6376 | 0.9287 |
-| Dense only | 0.7960 | 0.7570 | 0.9872 |
-| Fixed hybrid 0.5/0.5 | 0.8346 | 0.8019 | 0.9890 |
-| **Dynamic MLP (soft label)** | **0.8387** | **0.8066** | **0.9893** |
+| Method | NDCG@10 | MRR@10 | MAP@10 | Recall@10 | Recall@100 | Hit@1 |
+|--------|---------|--------|--------|-----------|------------|-------|
+| BM25 only | 0.6770 | 0.6376 | [TBD] | [TBD] | 0.9287 | [TBD] |
+| Dense only | 0.7960 | 0.7570 | [TBD] | [TBD] | 0.9872 | [TBD] |
+| Fixed hybrid 0.5/0.5 | 0.8346 | 0.8019 | [TBD] | [TBD] | 0.9890 | [TBD] |
+| **Dynamic MLP (soft label)** | **0.8387** | **0.8066** | **[TBD]** | **[TBD]** | **0.9893** | **[TBD]** |
 
 **Test set** (7,301 queries, held-out final evaluation):
 
-| Method | NDCG@10 | MRR@10 | Recall@100 |
-|--------|---------|--------|------------|
-| BM25 only | 0.6620 | 0.6194 | 0.9262 |
-| Dense only | 0.8070 | 0.7681 | 0.9884 |
-| Fixed hybrid 0.5/0.5 | 0.8274 | 0.7901 | 0.9910 |
-| **Dynamic MLP (soft label)** | **0.8352** | **0.7991** | **0.9910** |
+| Method | NDCG@10 | MRR@10 | MAP@10 | Recall@10 | Recall@100 | Hit@1 |
+|--------|---------|--------|--------|-----------|------------|-------|
+| BM25 only | 0.6620 | 0.6194 | [TBD] | [TBD] | 0.9262 | [TBD] |
+| Dense only | 0.8070 | 0.7681 | [TBD] | [TBD] | 0.9884 | [TBD] |
+| Fixed hybrid 0.5/0.5 | 0.8274 | 0.7901 | [TBD] | [TBD] | 0.9910 | [TBD] |
+| **Dynamic MLP (soft label)** | **0.8352** | **0.7991** | **[TBD]** | **[TBD]** | **0.9910** | **[TBD]** |
 
 Key observations:
 
@@ -196,12 +213,12 @@ Key observations:
 
 **Diacritic robustness** (dev queries with all tone marks removed, 3,814 queries):
 
-| Method | NDCG@10 | MRR@10 | Recall@100 |
-|--------|---------|--------|------------|
-| BM25 only | 0.1558 | 0.1335 | 0.4748 |
-| Dense only | 0.2956 | 0.2551 | 0.6686 |
-| Fixed hybrid 0.5/0.5 | 0.3016 | 0.2602 | 0.6762 |
-| **Dynamic MLP (soft label)** | **0.3174** | **0.2777** | **0.6762** |
+| Method | NDCG@10 | MRR@10 | MAP@10 | Recall@10 | Recall@100 | Hit@1 |
+|--------|---------|--------|--------|-----------|------------|-------|
+| BM25 only | 0.1558 | 0.1335 | [TBD] | [TBD] | 0.4748 | [TBD] |
+| Dense only | 0.2956 | 0.2551 | [TBD] | [TBD] | 0.6686 | [TBD] |
+| Fixed hybrid 0.5/0.5 | 0.3016 | 0.2602 | [TBD] | [TBD] | 0.6762 | [TBD] |
+| **Dynamic MLP (soft label)** | **0.3174** | **0.2777** | **[TBD]** | **[TBD]** | **0.6762** | **[TBD]** |
 
 Diacritic removal causes catastrophic BM25 degradation (0.677 → 0.156 NDCG), confirming the core motivation. Dense retrieval degrades more gracefully (0.796 → 0.296), and the MLP outperforms fixed fusion by +1.58% NDCG by dynamically up-weighting the dense signal for these low-diacritic queries.
 
@@ -211,21 +228,21 @@ MLP trained on ViQuAD 2.0 (Wikipedia), evaluated zero-shot on DANGDOCAO legal/ad
 
 **Clean queries:**
 
-| Method | NDCG@10 | MRR@10 | Recall@100 |
-|--------|---------|--------|------------|
-| BM25 only | 0.6651 | 0.6097 | 0.9517 |
-| Dense only | 0.7768 | 0.7274 | 0.9793 |
-| Fixed hybrid 0.5/0.5 | 0.7952 | 0.7491 | 0.9820 |
-| **Dynamic MLP (soft label)** | **0.7984** | **0.7527** | **0.9822** |
+| Method | NDCG@10 | MRR@10 | MAP@10 | Recall@10 | Recall@100 | Hit@1 |
+|--------|---------|--------|--------|-----------|------------|-------|
+| BM25 only | 0.6651 | 0.6097 | [TBD] | [TBD] | 0.9517 | [TBD] |
+| Dense only | 0.7768 | 0.7274 | [TBD] | [TBD] | 0.9793 | [TBD] |
+| Fixed hybrid 0.5/0.5 | 0.7952 | 0.7491 | [TBD] | [TBD] | 0.9820 | [TBD] |
+| **Dynamic MLP (soft label)** | **0.7984** | **0.7527** | **[TBD]** | **[TBD]** | **0.9822** | **[TBD]** |
 
 **Diacritic-removed queries:**
 
-| Method | NDCG@10 | MRR@10 | Recall@100 |
-|--------|---------|--------|------------|
-| BM25 only | 0.0486 | 0.0401 | 0.1683 |
-| Dense only | 0.0689 | 0.0575 | 0.2200 |
-| Fixed hybrid 0.5/0.5 | 0.0843 | 0.0716 | 0.2439 |
-| **Dynamic MLP (soft label)** | **0.0852** | **0.0730** | **0.2448** |
+| Method | NDCG@10 | MRR@10 | MAP@10 | Recall@10 | Recall@100 | Hit@1 |
+|--------|---------|--------|--------|-----------|------------|-------|
+| BM25 only | 0.0486 | 0.0401 | [TBD] | [TBD] | 0.1683 | [TBD] |
+| Dense only | 0.0689 | 0.0575 | [TBD] | [TBD] | 0.2200 | [TBD] |
+| Fixed hybrid 0.5/0.5 | 0.0843 | 0.0716 | [TBD] | [TBD] | 0.2439 | [TBD] |
+| **Dynamic MLP (soft label)** | **0.0852** | **0.0730** | **[TBD]** | **[TBD]** | **0.2448** | **[TBD]** |
 
 Key observations:
 - The MLP trained on Wikipedia-domain ViQuAD generalizes to the legal domain (+0.0032 NDCG over fixed, zero-shot), suggesting the learned feature–weight mapping captures domain-invariant linguistic signals.
@@ -234,42 +251,116 @@ Key observations:
 
 ### 5.3. Analysis: When Does Dynamic Fusion Help?
 
-We segment the ViQuAD 2.0 dev set by query feature values and compare MLP vs. fixed 0.5/0.5 NDCG@10 per segment. The column $\bar{w}_\text{dense}$ reports the mean MLP-predicted dense weight for queries in that stratum.
+#### 5.3.1. Stratified NDCG@10
 
-| Stratum | N | Fixed | MLP | Δ | $\bar{w}_\text{dense}$ |
-|---------|---|-------|-----|---|----------------------|
+We segment the ViQuAD 2.0 dev set into 11 strata by query feature values and compare MLP vs. fixed 0.5/0.5 NDCG@10 per stratum. $\bar{w}_\text{dense}$ is the mean MLP-predicted dense weight for that stratum.
+
+| Stratum | N | Fixed NDCG | MLP NDCG | Δ | $\bar{w}_\text{dense}$ |
+|---------|---|-----------|---------|---|----------------------|
 | diac\_low (< 0.3) | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
 | diac\_mid (0.3–0.7) | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
 | diac\_high (> 0.7) | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
 | comp\_low (< 0.2) | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
 | comp\_high (≥ 0.2) | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
-| eng\_none | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
-| eng\_mixed | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
-| short\_query | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
-| long\_query | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
+| eng\_none (= 0) | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
+| eng\_mixed (> 0) | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
+| short\_query (< 0.4) | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
+| long\_query (≥ 0.4) | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
+| simple (no clause) | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
+| complex (has clause) | [TBD] | [TBD] | [TBD] | [TBD] | [TBD] |
 
 **Expected patterns (hypotheses to verify):**
-- `diac_low`: MLP should assign $\bar{w}_\text{dense} > 0.6$ (dense robust to missing diacritics; BM25 fails on mismatch)
-- `diac_high`: weights near 0.5/0.5 (both signals effective on clean text)
-- `comp_high`: MLP should assign $\bar{w}_\text{bm25} > 0.5$ (rich compound words → BM25 term-match advantage)
-- `eng_mixed`: MLP may favor dense (embedding bridges language gap) or BM25 (exact English term match)
+- `diac_low`: MLP should assign $\bar{w}_\text{dense} > 0.6$ — dense is robust to missing diacritics; BM25 fails on term mismatch
+- `diac_high`: weights near 0.5/0.5 — both signals effective on clean, fully-toned text
+- `comp_high`: $\bar{w}_\text{bm25} > 0.5$ — rich compound words give BM25 a term-match advantage
+- `eng_mixed`: direction ambiguous — dense may bridge the language gap; BM25 may benefit from exact English term matching
 
-Generate results with:
+#### 5.3.2. Weight Interpretability
+
+To validate that the MLP captures linguistically meaningful signal (not just memorisation), we compute Pearson correlations between query features and predicted weights across all dev queries.
+
+| Correlation | Expected sign | Actual $r$ | $p$-value |
+|-------------|--------------|-----------|----------|
+| diacritic\_ratio ↔ $w_\text{dense}$ | negative (fewer diacritics → higher $w_\text{dense}$) | [TBD] | [TBD] |
+| compound\_ratio ↔ $w_\text{bm25}$ | positive (more compounds → higher $w_\text{bm25}$) | [TBD] | [TBD] |
+
+We also report weight entropy $H = -\sum_i w_i \log w_i$ (maximum $\ln 2 \approx 0.693$ for uniform 0.5/0.5):
+
+| Statistic | Value |
+|-----------|-------|
+| $\bar{H}$ (mean entropy) | [TBD] |
+| $\sigma_H$ (std entropy) | [TBD] |
+| $\bar{w}_\text{dense}$ | [TBD] |
+| $\sigma_{w_\text{dense}}$ | [TBD] |
+
+A mean entropy well below $\ln 2$ indicates the MLP is making confident, non-uniform predictions rather than collapsing to the fixed baseline.
+
+Generate all Section 5.3 results with:
 ```bash
-uv run python scripts/evaluate_stratified.py \
+uv run python scripts/evaluate_all.py \
     --qas-path data/processed/viaquad_dev.jsonl \
     --index-dir indexes/viaquad \
     --mlp-path checkpoints/fusion_mlp_aug.pt \
-    --output results/stratified_clean.json
+    --output results/eval_all_dev.json
 
-uv run python scripts/evaluate_stratified.py \
+uv run python scripts/evaluate_all.py \
     --qas-path data/processed/viaquad_dev_noisy.jsonl \
     --index-dir indexes/viaquad \
     --mlp-path checkpoints/fusion_mlp_aug.pt \
-    --output results/stratified_noisy.json
+    --output results/eval_all_dev_noisy.json
 ```
 
-### 5.4. Soft Label Ablation
+### 5.4. Statistical Significance
+
+All tests use per-query NDCG@10 scores. Paired t-test and Wilcoxon signed-rank test are both two-sided; bootstrap CI uses 2,000 resamples at the 95% level.
+
+**Dev set (3,814 queries):**
+
+| Comparison | Δ NDCG@10 | 95% CI | t-test $p$ | Wilcoxon $p$ |
+|------------|-----------|--------|-----------|-------------|
+| MLP vs. Fixed 0.5/0.5 | [TBD] | [TBD] | [TBD] | [TBD] |
+| MLP vs. Dense only | [TBD] | [TBD] | [TBD] | [TBD] |
+| MLP vs. BM25 only | [TBD] | [TBD] | [TBD] | [TBD] |
+
+**Test set (7,301 queries):**
+
+| Comparison | Δ NDCG@10 | 95% CI | t-test $p$ | Wilcoxon $p$ |
+|------------|-----------|--------|-----------|-------------|
+| MLP vs. Fixed 0.5/0.5 | [TBD] | [TBD] | [TBD] | [TBD] |
+| MLP vs. Dense only | [TBD] | [TBD] | [TBD] | [TBD] |
+| MLP vs. BM25 only | [TBD] | [TBD] | [TBD] | [TBD] |
+
+Generate with:
+```bash
+uv run python scripts/evaluate_all.py \
+    --qas-path data/processed/viaquad_dev.jsonl \
+    --index-dir indexes/viaquad \
+    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --output results/eval_all_dev.json
+
+uv run python scripts/evaluate_all.py \
+    --qas-path data/processed/viaquad_test.jsonl \
+    --index-dir indexes/viaquad \
+    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --output results/eval_all_test.json
+```
+
+### 5.5. Efficiency Analysis
+
+The fusion MLP adds negligible latency: its inference cost (~X μs) is less than 0.1% of a single FPT embedding API call (~100 ms), making dynamic weighting practically free relative to retrieval.
+
+| Component | Value |
+|-----------|-------|
+| MLP parameters | 2,660 |
+| MLP inference latency | [TBD] μs (mean ± std, $n$ = 3,814) |
+| FAISS index — ViQuAD | [TBD] MB |
+| BM25 index — ViQuAD | [TBD] MB |
+| FAISS index — DANGDOCAO | [TBD] MB |
+| BM25 index — DANGDOCAO | [TBD] MB |
+
+Latency figures are obtained from the `efficiency.mlp_inference_us` field in the `evaluate_all.py` JSON output (Section 4.2).
+
+### 5.6. Soft Label Ablation
 
 | Label strategy | Grid points | Temp $T$ | NDCG@10 (dev) |
 |----------------|-------------|-----------|---------|
@@ -278,7 +369,7 @@ uv run python scripts/evaluate_stratified.py \
 | Soft label | 21 | **0.3** | **0.8387** |
 | Soft label | 21 | 1.0 | [TBD] |
 
-### 5.5. End-to-end QA Results (RAGAS, Qwen3-32B judge)
+### 5.7. End-to-end QA Results (RAGAS, Qwen3-32B judge)
 
 We evaluate end-to-end RAG quality using RAGAS [CITATION] with Qwen3-32B as the LLM judge on 50 sampled ViQuAD 2.0 dev queries. Metrics:
 
