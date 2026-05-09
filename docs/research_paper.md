@@ -19,7 +19,7 @@ Retrieval-Augmented Generation (RAG) systems typically rely on a fixed combinati
 
 We present **Dynamic Hybrid RAG**, a lightweight framework that replaces fixed fusion weights with an adaptive MLP (≈2,600 parameters) that predicts per-query fusion weights `(w_dense, w_bm25)` from seven Vietnamese-aware linguistic features. The MLP is trained with a novel **soft-label supervision** strategy: rather than assigning the single best weight pair from a coarse grid, we use a temperature-scaled softmax over NDCG@10 scores across a 21-point grid to construct smooth target distributions, substantially reducing label noise.
 
-On the UIT-ViQuAD 2.0 benchmark, our method achieves **NDCG@10 = 0.8389** and **MRR@10 = 0.8070**, outperforming the best fixed-weight hybrid baseline (0.8340 / 0.8012), dense-only retrieval (0.7960 / 0.7570), and BM25-only retrieval (0.6775 / 0.6383). Zero-shot cross-domain evaluation on the DANGDOCAO legal corpus demonstrates that the learned fusion generalizes beyond the training domain.
+On the UIT-ViQuAD 2.0 test set, our method achieves **NDCG@10 = 0.8352** and **MRR@10 = 0.7991**, outperforming the best fixed-weight hybrid baseline (0.8274 / 0.7901), dense-only retrieval (0.8070 / 0.7681), and BM25-only retrieval (0.6620 / 0.6194). Under diacritic-removal noise (simulating real-world Vietnamese typing), the MLP achieves NDCG@10 = 0.3174 versus 0.3016 for fixed 0.5/0.5 and 0.1558 for BM25-only, demonstrating robustness to missing tone marks. Zero-shot cross-domain evaluation on the DANGDOCAO legal corpus demonstrates that the learned fusion generalizes beyond the training domain.
 
 ---
 
@@ -136,8 +136,8 @@ Training uses Adam optimizer with learning rate $10^{-4}$, batch size 256, for 1
 
 | Dataset | Domain | Passages | QA pairs | Split used |
 |---------|--------|----------|----------|------------|
-| UIT-ViQuAD 2.0 | Wikipedia (Vietnamese) | ~40K | ~28K train / 3.8K dev / 3.8K test | Train MLP; in-domain eval |
-| DANGDOCAO | Legal / Administrative (736 sub-domains) | — | — | Zero-shot cross-domain eval |
+| UIT-ViQuAD 2.0 | Wikipedia (Vietnamese) | 5,317 | 28,454 train / 3,814 dev / 7,301 test | Train MLP (aug. to 36,990); in-domain eval |
+| DANGDOCAO | Legal / Administrative (736 sub-domains) | 37,239 | 35,131 train / 4,391 dev / 4,391 test | Zero-shot cross-domain eval |
 
 ### 4.2. Evaluation Metrics
 
@@ -160,7 +160,7 @@ We report **NDCG@10**, **MRR@10**, and **Recall@100** on the retrieval task. The
 - **Generator:** Qwen3-32B via FPT AI Factory (`chat/completions`)
 - **Index:** FAISS `IndexFlatIP` with L2-normalized embeddings
 - **BM25:** `rank_bm25.BM25Okapi` with underthesea word tokenization
-- **MLP training:** Adam, lr=1e-4, 100 epochs, batch=256, seed=42
+- **MLP training:** Adam, lr=1e-3, 100 epochs, batch=256, seed=42, trained on 36,990 augmented queries (28,454 original + 8,536 diacritic-removed, 30% noise ratio)
 - **Hardware:** [Specify GPU/CPU details]
 - **Framework:** PyTorch 2.x, Python 3.13, uv package manager
 
@@ -168,34 +168,69 @@ We report **NDCG@10**, **MRR@10**, and **Recall@100** on the retrieval task. The
 
 ## 5. Results & Discussion
 
-### 5.1. In-domain Results (UIT-ViQuAD 2.0 Dev)
+### 5.1. In-domain Results (UIT-ViQuAD 2.0)
+
+**Dev set** (3,814 queries, used for model selection):
 
 | Method | NDCG@10 | MRR@10 | Recall@100 |
 |--------|---------|--------|------------|
-| BM25 only | 0.6775 | 0.6383 | 0.9303 |
-| Dense only | 0.7960 | 0.7570 | 0.9869 |
-| Fixed hybrid 0.5/0.5 | 0.8340 | 0.8011 | 0.9890 |
-| Dynamic MLP (hard label) | 0.7313 | 0.6936 | 0.9882 |
-| **Dynamic MLP (soft label)** | **0.8389** | **0.8070** | **0.9890** |
+| BM25 only | 0.6770 | 0.6376 | 0.9287 |
+| Dense only | 0.7960 | 0.7570 | 0.9872 |
+| Fixed hybrid 0.5/0.5 | 0.8346 | 0.8019 | 0.9890 |
+| **Dynamic MLP (soft label)** | **0.8387** | **0.8066** | **0.9893** |
+
+**Test set** (7,301 queries, held-out final evaluation):
+
+| Method | NDCG@10 | MRR@10 | Recall@100 |
+|--------|---------|--------|------------|
+| BM25 only | 0.6620 | 0.6194 | 0.9262 |
+| Dense only | 0.8070 | 0.7681 | 0.9884 |
+| Fixed hybrid 0.5/0.5 | 0.8274 | 0.7901 | 0.9910 |
+| **Dynamic MLP (soft label)** | **0.8352** | **0.7991** | **0.9910** |
 
 Key observations:
 
-- Fixed hybrid (0.5/0.5) substantially outperforms both single-signal baselines (+3.8% NDCG over dense-only), confirming the complementarity of dense and BM25 signals in Vietnamese.
-- Hard-label MLP **underperforms** dense-only (0.7313 vs 0.7960). The coarse 11-point grid produces labels that are highly sensitive to NDCG ties, causing the MLP to learn a biased weight distribution skewed toward BM25 for many query types.
-- Soft-label MLP **outperforms** the best fixed-weight baseline by **+0.49% NDCG** and **+0.59% MRR**, validating the adaptive fusion hypothesis. The improvement is modest but consistent, reflecting that the mean soft weights (dense: 0.524, bm25: 0.476) are close to 0.5/0.5 — the MLP's value lies in adapting away from this mean for query subsets where one signal clearly dominates.
+- Fixed hybrid (0.5/0.5) substantially outperforms both single-signal baselines (+3.2% NDCG over dense-only on test set), confirming the complementarity of dense and BM25 signals in Vietnamese.
+- Soft-label MLP **outperforms** the best fixed-weight baseline on both splits (+0.41/+0.78% NDCG dev/test, +0.47/+0.90% MRR), validating the adaptive fusion hypothesis.
+- The improvement is consistent despite mean soft weights (dense: 0.525, bm25: 0.475) being close to 0.5/0.5. This indicates the MLP's value lies in adapting away from the mean for query subsets where one signal dominates (see Section 5.3).
 
-### 5.2. Cross-domain Results (DANGDOCAO, Zero-shot)
-
-MLP trained on ViQuAD 2.0, evaluated zero-shot on DANGDOCAO legal corpus (results below from model v1 without diacritic augmentation; v2 with augmentation pending).
+**Diacritic robustness** (dev queries with all tone marks removed, 3,814 queries):
 
 | Method | NDCG@10 | MRR@10 | Recall@100 |
 |--------|---------|--------|------------|
-| BM25 only | 0.6655 | 0.6102 | 0.9508 |
-| Dense only | 0.7766 | 0.7271 | 0.9793 |
-| Fixed hybrid 0.5/0.5 | 0.7949 | 0.7488 | 0.9820 |
-| **Dynamic MLP (soft label, v2 aug)** | [TBD — re-run after new checkpoint] | [TBD] | [TBD] |
+| BM25 only | 0.1558 | 0.1335 | 0.4748 |
+| Dense only | 0.2956 | 0.2551 | 0.6686 |
+| Fixed hybrid 0.5/0.5 | 0.3016 | 0.2602 | 0.6762 |
+| **Dynamic MLP (soft label)** | **0.3174** | **0.2777** | **0.6762** |
 
-Key observation: the MLP trained on Wikipedia-domain ViQuAD generalizes to the legal domain, suggesting the learned feature–weight mapping captures domain-invariant linguistic signals rather than domain-specific patterns.
+Diacritic removal causes catastrophic BM25 degradation (0.677 → 0.156 NDCG), confirming the core motivation. Dense retrieval degrades more gracefully (0.796 → 0.296), and the MLP outperforms fixed fusion by +1.58% NDCG by dynamically up-weighting the dense signal for these low-diacritic queries.
+
+### 5.2. Cross-domain Results (DANGDOCAO, Zero-shot)
+
+MLP trained on ViQuAD 2.0 (Wikipedia), evaluated zero-shot on DANGDOCAO legal/administrative corpus (4,391 test queries). No DANGDOCAO data was seen during training.
+
+**Clean queries:**
+
+| Method | NDCG@10 | MRR@10 | Recall@100 |
+|--------|---------|--------|------------|
+| BM25 only | 0.6651 | 0.6097 | 0.9517 |
+| Dense only | 0.7768 | 0.7274 | 0.9793 |
+| Fixed hybrid 0.5/0.5 | 0.7952 | 0.7491 | 0.9820 |
+| **Dynamic MLP (soft label)** | **0.7984** | **0.7527** | **0.9822** |
+
+**Diacritic-removed queries:**
+
+| Method | NDCG@10 | MRR@10 | Recall@100 |
+|--------|---------|--------|------------|
+| BM25 only | 0.0486 | 0.0401 | 0.1683 |
+| Dense only | 0.0689 | 0.0575 | 0.2200 |
+| Fixed hybrid 0.5/0.5 | 0.0843 | 0.0716 | 0.2439 |
+| **Dynamic MLP (soft label)** | **0.0852** | **0.0730** | **0.2448** |
+
+Key observations:
+- The MLP trained on Wikipedia-domain ViQuAD generalizes to the legal domain (+0.0032 NDCG over fixed, zero-shot), suggesting the learned feature–weight mapping captures domain-invariant linguistic signals.
+- Diacritic removal is catastrophic on the cross-domain setting: NDCG drops from 0.7984 (clean) to 0.0852 (noisy MLP). This is more severe than the in-domain drop (0.8387 → 0.3174), likely because DANGDOCAO's legal terminology has lower tolerance for orthographic variation.
+- MLP consistently ranks first across all four conditions (in-domain clean/noisy, cross-domain clean/noisy), demonstrating robust adaptive fusion regardless of domain or noise level.
 
 ### 5.3. Analysis: When Does Dynamic Fusion Help?
 
@@ -236,11 +271,11 @@ uv run python scripts/evaluate_stratified.py \
 
 ### 5.4. Soft Label Ablation
 
-| Label strategy | Grid points | Temp $T$ | NDCG@10 |
+| Label strategy | Grid points | Temp $T$ | NDCG@10 (dev) |
 |----------------|-------------|-----------|---------|
-| Hard label | 11 | — | 0.7313 |
-| Soft label | 21 | 0.3 | **0.8389** |
+| Hard label | 11 | — | [TBD] |
 | Soft label | 21 | 0.1 | [TBD] |
+| Soft label | 21 | **0.3** | **0.8387** |
 | Soft label | 21 | 1.0 | [TBD] |
 
 ### 5.5. End-to-end QA Results (RAGAS, Qwen3-32B judge)
@@ -295,7 +330,7 @@ We presented Dynamic Hybrid RAG, a lightweight adaptive retrieval fusion system 
 
 The Vietnamese-aware feature extractor (diacritic ratio, compound word ratio, English code-switching, etc.) provides interpretable signal to the fusion module, offering a linguistically grounded explanation for when dense or BM25 retrieval should dominate.
 
-**Limitations and Future Work.** The current MLP is trained on 5,000 query samples from a single Wikipedia domain. Scaling to the full 28K training set and incorporating multi-domain training may further improve generalization. Future work will extend the architecture to three-way fusion incorporating BGE-M3's native sparse and multi-vector representations, and evaluate diacritic robustness through controlled noise injection experiments.
+**Limitations and Future Work.** The current MLP is trained on 36,990 augmented queries (28,454 original + 8,536 diacritic-removed copies at 30% noise ratio). While diacritic augmentation substantially improves robustness to missing tone marks, performance under noisy conditions remains significantly below clean-query performance (NDCG 0.32 vs 0.84), suggesting room for improvement. Future work will extend the architecture to three-way fusion incorporating BGE-M3's native sparse and multi-vector representations, explore cross-lingual transfer to other tonal languages, and investigate curriculum strategies for noise injection during training.
 
 ---
 
