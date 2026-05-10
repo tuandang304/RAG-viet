@@ -1,6 +1,6 @@
 # Dynamic Hybrid RAG for Vietnamese
 
-Adaptive retrieval-augmented generation for Vietnamese that replaces fixed fusion weights with a per-query MLP (~2,660 params). The MLP predicts `(w_dense, w_bm25)` from seven Vietnamese-aware linguistic features, outperforming the best fixed-weight hybrid on UIT-ViQuAD 2.0 (NDCG@10 0.8352 vs 0.8274 on the test set).
+Adaptive retrieval-augmented generation for Vietnamese that replaces fixed fusion weights with a per-query MLP (~2,660 params). The MLP predicts `(w_dense, w_bm25, w_sparse)` from seven Vietnamese-aware linguistic features, enabling dynamic three-way fusion across dense (FPT), BM25, and BGE-M3 sparse signals.
 
 ---
 
@@ -43,7 +43,6 @@ Open `.env` and set the following variables:
 FPT_API_KEY=your_api_key_here          # Get from https://factory.fpt.ai
 FPT_BASE_URL=https://mkp-api.fptcloud.com/v1
 FPT_EMBEDDING_MODEL=vietnamese-embedding
-FPT_SPARSE_MODEL=vietnamese-embedding
 FPT_LLM_MODEL=Qwen3-32B
 
 # Retrieval config (defaults work fine)
@@ -112,7 +111,7 @@ Each run produces two files alongside the input:
 
 ### Step 3 — Build Indexes
 
-Embeds passages via FPT API and builds FAISS + BM25 indexes. **Requires an active `.env`.**
+Builds FAISS dense, BM25, and BGE-M3 sparse indexes. **Requires an active `.env`.**
 
 ```bash
 # ViQuAD index
@@ -124,6 +123,12 @@ uv run python scripts/build_index.py \
 uv run python scripts/build_index.py \
     --data-path data/processed/dangdocao_passages.jsonl \
     --index-dir indexes/dangdocao
+
+# Skip sparse index (no BGE-M3 download required)
+uv run python scripts/build_index.py \
+    --data-path data/processed/viaquad_passages.jsonl \
+    --index-dir indexes/viaquad \
+    --no-sparse
 ```
 
 Each index directory will contain:
@@ -132,9 +137,12 @@ Each index directory will contain:
 |---|---|
 | `index.faiss` | FAISS `IndexFlatIP` with L2-normalized 1024-dim embeddings |
 | `bm25.pkl` | BM25Okapi model with underthesea word tokenization |
+| `sparse.pkl` | BGE-M3 inverted index (lexical weights) — ~570 MB model downloaded on first run |
 | `meta.json` | Passage IDs and metadata |
 
 > **API cost note:** Building indexes calls the FPT embedding API for every passage. ViQuAD (~5K passages) and DANGDOCAO (~37K passages) will incur API costs accordingly.
+>
+> **BGE-M3 note:** The sparse index uses `BAAI/bge-m3` via FlagEmbedding (local inference, no API cost). The model (~570 MB) is downloaded automatically on first run.
 
 ---
 
@@ -208,15 +216,15 @@ uv run python scripts/evaluate_all.py \
     --output results/eval_all_cross.json
 ```
 
-The script evaluates four methods (MLP, fixed 0.5/0.5, dense-only, BM25-only) simultaneously and reports:
+The script evaluates six methods simultaneously — `mlp`, `fixed_equal` (1/3,1/3,1/3), `dense_bm25` (0.5,0.5,0), `dense`, `bm25`, `sparse` — and reports:
 
 | Metric group | What you get |
 |---|---|
 | **Retrieval** | NDCG@10, MRR@10, MAP@10, Recall@10, Recall@100, Hit@1 per method |
 | **Significance** | Paired t-test p, Wilcoxon p, 95% bootstrap CI for MLP vs each baseline |
-| **Efficiency** | MLP param count, index sizes (MB), MLP inference latency (μs) |
-| **Weight analysis** | Entropy, w_dense distribution, Pearson(diacritic_ratio ↔ w_dense) |
-| **Stratified** | NDCG@10 per query-feature stratum (diac_low/mid/high, comp, eng, length, clause) |
+| **Efficiency** | MLP param count, index sizes (MB), latency p50/p95, throughput (q/s) |
+| **Weight analysis** | Entropy H, weight distributions, Pearson correlations (diacritic↔w_dense, compound↔w_bm25, english↔w_sparse) |
+| **Stratified** | NDCG@10 and mean weights per query-feature stratum (11 strata: diac_low/mid/high, comp, eng, length, clause) |
 
 Each query calls the FPT embedding API exactly once; all four methods share the same dense/BM25 hits.
 
@@ -277,11 +285,12 @@ RAG_vie/
 │   │   ├── embedder.py         # FPT embedding API, batch size 32
 │   │   ├── dense.py            # DenseRetriever — FAISS IndexFlatIP, L2-norm
 │   │   ├── bm25.py             # BM25Retriever — BM25Okapi + underthesea
-│   │   └── hybrid.py           # HybridRetriever — min-max normalize + weighted sum
+│   │   ├── sparse.py           # SparseRetriever — BGE-M3 local, inverted index
+│   │   └── hybrid.py           # HybridRetriever — 3-way min-max normalize + weighted sum
 │   ├── features/
 │   │   └── vietnamese.py       # 7 Vietnamese-aware query features
 │   ├── fusion/
-│   │   └── mlp.py              # FusionMLP — Linear(7→64→32→2) + softmax
+│   │   └── mlp.py              # FusionMLP — Linear(7→64→32→3) + softmax → (w_dense, w_bm25, w_sparse)
 │   ├── generator/
 │   │   └── llm.py              # Qwen3-32B via FPT chat/completions
 │   └── utils/
