@@ -23,6 +23,13 @@ Usage:
         --output results/eval_all_cross.json
 """
 
+# IMPORTANT: pyarrow must be imported BEFORE torch / faiss on Windows + CUDA.
+# Otherwise pyarrow's native DLL load triggers an access violation (0xC0000005)
+# the first time something downstream (pandas → pyarrow, or HuggingFace
+# datasets → pyarrow) tries to load it after PyTorch/CUDA has initialised.
+# Pre-loading pyarrow grabs its DLL slots before the conflict can occur.
+import pyarrow  # noqa: F401
+
 import argparse
 import json
 import os
@@ -37,8 +44,16 @@ from rag_vie.config import settings
 from rag_vie.features.vietnamese import FEATURE_NAMES, extract_features
 from rag_vie.fusion.mlp import FusionMLP
 from rag_vie.retrieval.bm25 import BM25Retriever
-from rag_vie.retrieval.dense import DenseRetriever
 from rag_vie.retrieval.embedder import embed_query
+
+# NOTE: DenseRetriever (which transitively imports faiss) is intentionally NOT
+# imported at runtime here. faiss's MKL/OpenMP runtime collides with the
+# PyTorch/CUDA runtime used by BGE-M3 unless PyTorch is initialised first.
+# main() imports DenseRetriever lazily AFTER BGE-M3 has been loaded.
+# The TYPE_CHECKING import is purely for static type hints on `run_eval`.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from rag_vie.retrieval.dense import DenseRetriever  # noqa: F401
 
 
 # ── Strata ────────────────────────────────────────────────────────────────────
@@ -170,7 +185,7 @@ def significance_tests(a: np.ndarray, b: np.ndarray) -> dict:
 
 def run_eval(
     qas:       list[dict],
-    dense:     DenseRetriever,
+    dense:     "DenseRetriever",
     bm25_r:    BM25Retriever,
     mlp:       FusionMLP,
     k_dense:   int,
@@ -439,29 +454,50 @@ def main() -> None:
     parser.add_argument("--k-bm25",      type=int, default=None)
     parser.add_argument("--k-sparse",    type=int, default=100)
     parser.add_argument("--k-final",     type=int, default=100)
+    parser.add_argument("--max-samples", type=int, default=None,
+                        help="If set, randomly subsample N queries (seeded). "
+                             "Use this instead of head -n N to avoid HF-grouped-by-article bias.")
+    parser.add_argument("--subset-seed", type=int, default=42,
+                        help="Seed for --max-samples subsetting (default: 42)")
     parser.add_argument("--output",      default=None, help="Save JSON to this path")
     args = parser.parse_args()
 
     k_dense = args.k_dense or settings.top_k_dense
     k_bm25  = args.k_bm25  or settings.top_k_bm25
 
-    dense  = DenseRetriever.load(args.index_dir)
-    bm25_r = BM25Retriever.load(str(Path(args.index_dir) / "bm25.pkl"))
-    mlp    = FusionMLP.load(args.mlp_path)
-
+    # NB: BGE-M3 (PyTorch / CUDA) MUST be initialised BEFORE FAISS, otherwise
+    # FAISS' MKL/OpenMP runtime collides with PyTorch's and the process
+    # segfaults on the first sparse.encode call. See CLAUDE.md "OMP deadlock"
+    # note — same fix applies on Windows (manifests as exit 0xC0000005).
     sparse_r = None
     if not args.no_sparse:
         sparse_path = args.sparse_path or str(Path(args.index_dir) / "sparse.pkl")
         if Path(sparse_path).exists():
-            from rag_vie.retrieval.sparse import SparseRetriever
+            from rag_vie.retrieval.sparse import SparseRetriever, _encode_sparse
             sparse_r = SparseRetriever.load(sparse_path)
-            print(f"Sparse index loaded from {sparse_path}")
+            print(f"Sparse index loaded from {sparse_path}", flush=True)
+            # Pre-warm BGE-M3 (triggers model load + CUDA init before FAISS).
+            _ = _encode_sparse(["warmup"])
+            print("BGE-M3 warmed up", flush=True)
         else:
             print(f"NOTE: sparse.pkl not found at {sparse_path} — running 2-way fallback.")
+
+    # Lazy import: faiss only loads here, AFTER PyTorch/CUDA is initialised.
+    from rag_vie.retrieval.dense import DenseRetriever  # noqa: E402
+
+    dense  = DenseRetriever.load(args.index_dir)
+    bm25_r = BM25Retriever.load(str(Path(args.index_dir) / "bm25.pkl"))
+    mlp    = FusionMLP.load(args.mlp_path)
 
     with open(args.qas_path, encoding="utf-8") as f:
         qas = [json.loads(line) for line in f if line.strip()]
     print(f"Loaded {len(qas):,} queries from {args.qas_path}")
+
+    if args.max_samples is not None and args.max_samples < len(qas):
+        import random as _random
+        _rng = _random.Random(args.subset_seed)
+        qas = _rng.sample(qas, args.max_samples)
+        print(f"Subsampled to {len(qas):,} queries (seed={args.subset_seed})")
 
     results = run_eval(
         qas, dense, bm25_r, mlp,

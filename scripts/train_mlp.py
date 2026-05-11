@@ -39,12 +39,19 @@ import numpy as np
 from tqdm import tqdm
 
 
-# ── Simplex grid: step = 0.1 → 66 points (a, b, c) with a+b+c=1 ─────────────
+# ── Simplex grids ────────────────────────────────────────────────────────────
+# Three-way: full 2-simplex, step = 0.1 → 66 points (a, b, c) with a+b+c=1
+# Two-way:   edge of simplex where c=0, step = 0.1 → 11 points (a, b, 0) with a+b=1
+#            (used when sparse retriever is unavailable so the soft-label target
+#             does not leak weight onto a dead signal — see Issue #3 in review)
 _N = 10
-WEIGHT_GRID: list[tuple[float, float, float]] = [
+WEIGHT_GRID_3WAY: list[tuple[float, float, float]] = [
     (i / _N, j / _N, (_N - i - j) / _N)
     for i in range(_N + 1)
     for j in range(_N + 1 - i)
+]
+WEIGHT_GRID_2WAY: list[tuple[float, float, float]] = [
+    (i / _N, (_N - i) / _N, 0.0) for i in range(_N + 1)
 ]
 TOP_K = 100
 
@@ -145,19 +152,26 @@ def find_soft_weights(
     sparse_scores: dict[str, float],
     relevant_ids: set[str],
     temperature: float = 0.3,
+    include_sparse: bool = True,
+    hard_label: bool = False,
 ) -> tuple[float, float, float]:
-    """3D soft-label grid search on the simplex.
+    """Label-construction grid search on the simplex.
 
-    Computes NDCG@10 for each of the 66 simplex grid points,
-    applies softmax(NDCG / T), returns expected (a, b, c).
+    include_sparse=True  → full 2-simplex, 66 grid points, returns (a, b, c).
+    include_sparse=False → 1-simplex edge with c=0, 11 grid points, returns (a, b, 0).
+    hard_label=False     → temperature-scaled softmax expectation over the grid (soft label).
+    hard_label=True      → argmax over the grid: returns the single best simplex point.
+                            Ties are broken in favour of the first point encountered.
     """
+    grid = WEIGHT_GRID_3WAY if include_sparse else WEIGHT_GRID_2WAY
+
     dense_n  = _minmax(dense_scores)
     bm25_n   = _minmax(bm25_scores)
-    sparse_n = _minmax(sparse_scores)
+    sparse_n = _minmax(sparse_scores) if include_sparse else {}
     all_ids  = list(set(dense_n) | set(bm25_n) | set(sparse_n))
 
     ndcg_vals = []
-    for a, b, c in WEIGHT_GRID:
+    for a, b, c in grid:
         fused = {
             pid: a * dense_n.get(pid, 0.0) + b * bm25_n.get(pid, 0.0) + c * sparse_n.get(pid, 0.0)
             for pid in all_ids
@@ -166,13 +180,19 @@ def find_soft_weights(
         ndcg_vals.append(ndcg_at_k(ranked, relevant_ids, 10))
 
     arr = np.array(ndcg_vals, dtype=np.float64)
+
+    if hard_label:
+        best_idx = int(np.argmax(arr))
+        a, b, c = grid[best_idx]
+        return float(a), float(b), float(c)
+
     arr -= arr.max()
     probs = np.exp(arr / temperature)
     probs /= probs.sum()
 
-    ea = float(sum(p * a for p, (a, b, c) in zip(probs, WEIGHT_GRID)))
-    eb = float(sum(p * b for p, (a, b, c) in zip(probs, WEIGHT_GRID)))
-    ec = float(sum(p * c for p, (a, b, c) in zip(probs, WEIGHT_GRID)))
+    ea = float(sum(p * a for p, (a, b, c) in zip(probs, grid)))
+    eb = float(sum(p * b for p, (a, b, c) in zip(probs, grid)))
+    ec = float(sum(p * c for p, (a, b, c) in zip(probs, grid)))
     total = ea + eb + ec
     return ea / total, eb / total, ec / total
 
@@ -184,6 +204,7 @@ def collect_training_pairs(
     sparse,                         # SparseRetriever | None
     query_embeddings: np.ndarray,
     temperature: float,
+    hard_label: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (X: features, Y: 3-way soft-label weights).
 
@@ -202,13 +223,18 @@ def collect_training_pairs(
         features_list.append(extract_features(qa["question"]))
 
     # Phase 2: Sparse search (PyTorch — must come BEFORE faiss.normalize_L2)
-    print("  Phase 2/4: Sparse search (BGE-M3)…")
     sparse_results: list[dict[str, float]] = []
     if sparse is not None:
-        for qa in tqdm(qas, desc="  Sparse"):
-            hits = sparse.search(qa["question"], TOP_K)
+        print("  Phase 2/4: Sparse search (BGE-M3, batched on GPU when available)…")
+        all_queries = [qa["question"] for qa in qas]
+        # search_batch encodes the entire query list in one BGE-M3 call so the
+        # GPU dispatch + Python overhead is amortized across N queries (~10×
+        # faster than the per-query loop when running on CUDA).
+        batched = sparse.search_batch(all_queries, TOP_K)
+        for hits in batched:
             sparse_results.append({pid: s for pid, _, s in hits})
     else:
+        print("  Phase 2/4: Sparse search SKIPPED (no sparse retriever — 2-way training)")
         sparse_results = [{} for _ in qas]
 
     # Phase 3: FAISS dense batch search
@@ -217,8 +243,12 @@ def collect_training_pairs(
     faiss.normalize_L2(embs)
     scores_arr, indices_arr = dense._index.search(embs, TOP_K)
 
-    # Phase 4: 3D soft-label grid search
-    print(f"  Phase 4/4: 3D soft-label grid search (T={temperature}, {len(WEIGHT_GRID)} grid pts)…")
+    # Phase 4: soft-label grid search
+    include_sparse = sparse is not None
+    grid_dim = "3D simplex" if include_sparse else "2D edge (c=0, sparse disabled)"
+    n_grid = len(WEIGHT_GRID_3WAY) if include_sparse else len(WEIGHT_GRID_2WAY)
+    label_kind = "HARD-label (argmax)" if hard_label else f"SOFT-label (T={temperature})"
+    print(f"  Phase 4/4: {label_kind} grid search — {grid_dim} ({n_grid} grid pts)…")
     X_list, Y_list = [], []
     for i, qa in enumerate(tqdm(qas, desc="  Soft-grid")):
         relevant_ids = set(qa["relevant_ids"])
@@ -233,7 +263,10 @@ def collect_training_pairs(
         bm25_scores  = {pid: s for pid, _, s in bm25_results[i]}
         sparse_scores = sparse_results[i]
 
-        a, b, c = find_soft_weights(dense_scores, bm25_scores, sparse_scores, relevant_ids, temperature)
+        a, b, c = find_soft_weights(
+            dense_scores, bm25_scores, sparse_scores, relevant_ids,
+            temperature, include_sparse=include_sparse, hard_label=hard_label,
+        )
 
         X_list.append(features_list[i])
         Y_list.append([a, b, c])
@@ -296,6 +329,9 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int,   default=256)
     parser.add_argument("--lr",         type=float, default=1e-3)
     parser.add_argument("--temperature", type=float, default=0.3)
+    parser.add_argument("--hard-label",  action="store_true",
+                        help="Use argmax over the simplex grid instead of "
+                             "temperature-scaled soft expectation (§5.6 ablation).")
     parser.add_argument("--seed",       type=int,   default=42)
     args = parser.parse_args()
 
@@ -343,9 +379,11 @@ def main() -> None:
             np.save(args.emb_cache, query_embeddings)
             print(f"  Cached → {args.emb_cache}")
 
-    # Collect soft-label training pairs
-    print("Collecting 3-way soft-label training pairs…")
-    X, Y = collect_training_pairs(qas, dense, bm25, sparse, query_embeddings, args.temperature)
+    # Collect training pairs
+    label_kind = "HARD-label" if args.hard_label else f"SOFT-label (T={args.temperature})"
+    print(f"Collecting 3-way {label_kind} training pairs…")
+    X, Y = collect_training_pairs(qas, dense, bm25, sparse, query_embeddings,
+                                  args.temperature, hard_label=args.hard_label)
     print(f"Pairs: {len(X)}  |  dim: {X.shape[1]}  |  output: {Y.shape[1]}", flush=True)
     print(f"Mean weights — dense: {Y[:, 0].mean():.3f}  bm25: {Y[:, 1].mean():.3f}  sparse: {Y[:, 2].mean():.3f}", flush=True)
 

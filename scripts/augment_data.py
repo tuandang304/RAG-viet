@@ -34,7 +34,12 @@ def augment(
     noise_ratio: float,
     rng: random.Random,
 ) -> list[dict]:
-    """Return original list + noisy copies of `noise_ratio` fraction."""
+    """Return original list + noisy copies of `noise_ratio` fraction, then shuffled.
+
+    Output is shuffled so that consumers using sequential slicing
+    (head -n N, iloc[:N], etc.) do not get a bias-free subset that contains zero
+    diacritic-removed copies — they would otherwise live at the tail of the file.
+    """
     n_noisy = round(len(qas) * noise_ratio)
     chosen = rng.sample(range(len(qas)), n_noisy)
     noisy_copies = []
@@ -43,7 +48,9 @@ def augment(
         qa["question"] = remove_diacritics(qa["question"])
         qa["id"] = qa.get("id", str(idx)) + "_noisy"
         noisy_copies.append(qa)
-    return qas + noisy_copies
+    combined = qas + noisy_copies
+    rng.shuffle(combined)
+    return combined
 
 
 def make_noisy(qas: list[dict]) -> list[dict]:

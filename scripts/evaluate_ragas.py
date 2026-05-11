@@ -26,6 +26,10 @@ Usage:
         --output results/ragas_noisy.json
 """
 
+# IMPORTANT: pyarrow must be imported BEFORE torch/faiss on Windows + CUDA
+# (see scripts/evaluate_all.py for the access-violation incident this guards).
+import pyarrow  # noqa: F401
+
 import argparse
 import json
 import random
@@ -34,15 +38,15 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from openai import AsyncOpenAI, OpenAI
 from ragas import SingleTurnSample, evaluate
-from ragas.embeddings import LangchainEmbeddingsWrapper
-from ragas.llms import LangchainLLMWrapper
+from ragas.embeddings.base import embedding_factory
+from ragas.llms import llm_factory
 from ragas.metrics.collections import (
     AnswerRelevancy,
+    ContextPrecisionWithReference,
+    ContextRecall,
     Faithfulness,
-    LLMContextPrecisionWithReference,
-    LLMContextRecall,
 )
 from tqdm import tqdm
 
@@ -51,47 +55,62 @@ from rag_vie.features.vietnamese import extract_features
 from rag_vie.fusion.mlp import FusionMLP
 from rag_vie.generator.llm import generate
 from rag_vie.retrieval.bm25 import BM25Retriever
-from rag_vie.retrieval.dense import DenseRetriever
-from rag_vie.retrieval.hybrid import HybridRetriever
+# NOTE: DenseRetriever (which transitively imports faiss) is intentionally NOT
+# imported at module load. main() imports it lazily AFTER BGE-M3 has been loaded.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from rag_vie.retrieval.dense import DenseRetriever  # noqa: F401
+    from rag_vie.retrieval.hybrid import HybridRetriever  # noqa: F401
 
 
 # ── RAGAS judge setup ──────────────────────────────────────────────────────
+# RAGAS 0.4.x dropped LangchainLLMWrapper / LangchainEmbeddingsWrapper for the
+# "modern" InstructorBaseRagasLLM factory. We supply a pre-built OpenAI client
+# pointing at FPT AI Factory (OpenAI-compatible API) — same credentials as the
+# rest of the pipeline use via src/rag_vie/retrieval/embedder.py.
 
-def make_ragas_llm() -> LangchainLLMWrapper:
-    llm = ChatOpenAI(
+def _fpt_async_client() -> AsyncOpenAI:
+    """Async OpenAI client pointed at FPT — required because ragas metrics
+    call `agenerate()` internally on the supplied LLM/embedding clients.
+    A sync `OpenAI(...)` client raises TypeError on every metric call."""
+    return AsyncOpenAI(api_key=settings.fpt_api_key, base_url=settings.fpt_base_url)
+
+
+def make_ragas_llm():
+    return llm_factory(
         model=settings.fpt_llm_model,
-        base_url=settings.fpt_base_url,
-        api_key=settings.fpt_api_key,
+        provider="openai",
+        client=_fpt_async_client(),
         temperature=0.0,
         max_tokens=1024,
     )
-    return LangchainLLMWrapper(llm)
 
 
-def make_ragas_embeddings() -> LangchainEmbeddingsWrapper:
-    emb = OpenAIEmbeddings(
+def make_ragas_embeddings():
+    return embedding_factory(
+        provider="openai",
         model=settings.fpt_embedding_model,
-        base_url=settings.fpt_base_url,
-        api_key=settings.fpt_api_key,
+        client=_fpt_async_client(),
     )
-    return LangchainEmbeddingsWrapper(emb)
 
 
 # ── Retrieval helpers ──────────────────────────────────────────────────────
 
-METHODS = {
-    "dynamic_mlp":    None,           # weights from MLP, set after loading
-    "fixed_0.5_0.5":  (0.5, 0.5),
-    "dense_only":      (1.0, 0.0),
-    "bm25_only":       (0.0, 1.0),
+# Three-way fusion weight triples matching evaluate_all.py METHODS.
+METHODS: dict[str, tuple[float, float, float] | None] = {
+    "dynamic_mlp":   None,                # weights from MLP, predicted per query
+    "fixed_equal":   (1/3, 1/3, 1/3),     # uniform three-way
+    "dense_only":    (1.0, 0.0, 0.0),
+    "bm25_only":     (0.0, 1.0, 0.0),
+    "sparse_only":   (0.0, 0.0, 1.0),
 }
 
 
 def retrieve_contexts(
-    hybrid: HybridRetriever,
+    hybrid: "HybridRetriever",
     passages_map: dict[str, str],
     query: str,
-    weights: tuple[float, float],
+    weights: tuple[float, ...],
     top_k: int,
 ) -> list[str]:
     hits = hybrid.retrieve(query, weights, settings.top_k_dense, settings.top_k_bm25, top_k)
@@ -102,11 +121,11 @@ def retrieve_contexts(
 
 def build_samples(
     qas: list[dict],
-    hybrid: HybridRetriever,
+    hybrid: "HybridRetriever",
     passages_map: dict[str, str],
     mlp: FusionMLP,
     method: str,
-    fixed_w: tuple[float, float] | None,
+    fixed_w: tuple[float, ...] | None,
     top_k: int,
 ) -> list[SingleTurnSample]:
     samples = []
@@ -140,17 +159,65 @@ def build_samples(
 
 def evaluate_method(
     samples: list[SingleTurnSample],
-    ragas_llm: LangchainLLMWrapper,
-    ragas_emb: LangchainEmbeddingsWrapper,
+    ragas_llm,
+    ragas_emb,
 ) -> dict[str, float]:
-    metrics = [
-        LLMContextPrecisionWithReference(llm=ragas_llm),
-        LLMContextRecall(llm=ragas_llm),
-        Faithfulness(llm=ragas_llm),
-        AnswerRelevancy(llm=ragas_llm, embeddings=ragas_emb),
-    ]
-    result = evaluate(samples, metrics=metrics)
-    return {k: round(float(v), 4) for k, v in result.items()}
+    """Score every sample against all four RAGAS metrics, return per-metric mean.
+
+    RAGAS 0.4.3 split metrics into modern `collections.*` classes that take
+    keyword args via `.score()` rather than the old `evaluate(samples, metrics)`
+    function (which now rejects collection-style instances). We call each metric
+    per sample and aggregate manually — slower than the batched legacy path but
+    works with the modern instructor-based LLM factory.
+    """
+    cp = ContextPrecisionWithReference(llm=ragas_llm)
+    cr = ContextRecall(llm=ragas_llm)
+    fa = Faithfulness(llm=ragas_llm)
+    ar = AnswerRelevancy(llm=ragas_llm, embeddings=ragas_emb)
+
+    scores: dict[str, list[float]] = {
+        "context_precision": [],
+        "context_recall":    [],
+        "faithfulness":      [],
+        "answer_relevancy":  [],
+    }
+
+    # Each metric in ragas 0.4.x takes its own exact kwargs. Pass only what
+    # the metric needs — passing extras raises TypeError.
+    def _kw_for(name: str, s: SingleTurnSample) -> dict:
+        if name == "context_precision":
+            return dict(user_input=s.user_input, reference=s.reference,
+                        retrieved_contexts=s.retrieved_contexts)
+        if name == "context_recall":
+            return dict(user_input=s.user_input, retrieved_contexts=s.retrieved_contexts,
+                        reference=s.reference)
+        if name == "faithfulness":
+            return dict(user_input=s.user_input, response=s.response,
+                        retrieved_contexts=s.retrieved_contexts)
+        if name == "answer_relevancy":
+            return dict(user_input=s.user_input, response=s.response)
+        raise ValueError(name)
+
+    for s in tqdm(samples, desc="  RAGAS scoring"):
+        for name, metric in [
+            ("context_precision", cp),
+            ("context_recall",    cr),
+            ("faithfulness",      fa),
+            ("answer_relevancy",  ar),
+        ]:
+            try:
+                result = metric.score(**_kw_for(name, s))
+                val = getattr(result, "value", None)
+                if val is None or (isinstance(val, float) and (val != val)):  # NaN check
+                    continue
+                scores[name].append(float(val))
+            except Exception as e:
+                print(f"    [warn] {name} failed on a sample: {type(e).__name__}: {e}", flush=True)
+
+    return {
+        name: round(sum(vals) / len(vals), 4) if vals else float("nan")
+        for name, vals in scores.items()
+    }
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
@@ -164,8 +231,12 @@ def main() -> None:
     parser.add_argument("--mlp-path",    required=True)
     parser.add_argument("--n-samples",   type=int, default=50)
     parser.add_argument("--top-k",       type=int, default=10)
-    parser.add_argument("--methods",     default="dynamic_mlp,fixed_0.5_0.5,dense_only,bm25_only",
-                        help="Comma-separated methods to evaluate")
+    parser.add_argument("--methods",     default="dynamic_mlp,fixed_equal,dense_only,bm25_only,sparse_only",
+                        help="Comma-separated methods to evaluate (3-way names)")
+    parser.add_argument("--sparse-path", default=None,
+                        help="Sparse index pkl (default: <index-dir>/sparse.pkl)")
+    parser.add_argument("--no-sparse",   action="store_true",
+                        help="Disable sparse retriever (run 2-way only)")
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--output",      default=None)
     args = parser.parse_args()
@@ -195,10 +266,27 @@ def main() -> None:
             obj = json.loads(line)
             passages_map[obj["id"]] = obj["passage"]
 
-    # Load retrievers
+    # Load sparse retriever FIRST (PyTorch / CUDA must initialise before FAISS;
+    # otherwise FAISS' MKL/OMP runtime collides and the process segfaults).
+    sparse = None
+    if not args.no_sparse:
+        sparse_path = args.sparse_path or str(Path(args.index_dir) / "sparse.pkl")
+        if Path(sparse_path).exists():
+            from rag_vie.retrieval.sparse import SparseRetriever, _encode_sparse
+            sparse = SparseRetriever.load(sparse_path)
+            print(f"Sparse index loaded from {sparse_path}", flush=True)
+            _ = _encode_sparse(["warmup"])
+            print("BGE-M3 warmed up", flush=True)
+        else:
+            print(f"NOTE: sparse.pkl not found at {sparse_path} — running 2-way fallback.")
+
+    # Lazy faiss / dense import — must come AFTER BGE-M3 init.
+    from rag_vie.retrieval.dense import DenseRetriever
+    from rag_vie.retrieval.hybrid import HybridRetriever
+
     dense  = DenseRetriever.load(args.index_dir)
     bm25   = BM25Retriever.load(str(Path(args.index_dir) / "bm25.pkl"))
-    hybrid = HybridRetriever(dense, bm25)
+    hybrid = HybridRetriever(dense, bm25, sparse=sparse)
     mlp    = FusionMLP.load(args.mlp_path)
 
     # RAGAS judge

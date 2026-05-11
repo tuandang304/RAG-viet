@@ -96,9 +96,15 @@ def process_dangdocao(out_dir: Path, dev_ratio: float = 0.1, test_ratio: float =
 
     Dataset chỉ có split 'train' → tự chia train/dev/test theo tỉ lệ 80/10/10.
     Mỗi row có cấu trúc SQuAD-style lồng trong field 'data'.
+
+    Split is **group-by-passage** (group-aware): every QA whose `relevant_ids`
+    contains a given passage is assigned to the same split as that passage.
+    This prevents passage-level leakage between train/dev/test — without it,
+    the same passage can have one QA in train and another in test, and the
+    MLP indirectly learns retrieval patterns for that passage at train time.
     """
     import random
-    random.seed(seed)
+    rng = random.Random(seed)
 
     print("\n=== DANGDOCAO/GeneratingQuestions ===")
     ds = load_dataset("DANGDOCAO/GeneratingQuestions")
@@ -126,16 +132,30 @@ def process_dangdocao(out_dir: Path, dev_ratio: float = 0.1, test_ratio: float =
                     "_domain": title,   # kept for analysis, stripped before saving
                 })
 
-    # Shuffle và chia split
-    random.shuffle(all_records)
-    n = len(all_records)
-    n_test = int(n * test_ratio)
-    n_dev  = int(n * dev_ratio)
-    splits = {
-        "test":  all_records[:n_test],
-        "dev":   all_records[n_test : n_test + n_dev],
-        "train": all_records[n_test + n_dev :],
-    }
+    # Group-by-passage split — assign every passage to one split, then map QAs.
+    all_pids = sorted(passages.keys())   # sorted for determinism before shuffle
+    rng.shuffle(all_pids)
+    n_pid = len(all_pids)
+    n_test_pid = int(n_pid * test_ratio)
+    n_dev_pid  = int(n_pid * dev_ratio)
+    pid_to_split = {}
+    for pid in all_pids[:n_test_pid]:
+        pid_to_split[pid] = "test"
+    for pid in all_pids[n_test_pid : n_test_pid + n_dev_pid]:
+        pid_to_split[pid] = "dev"
+    for pid in all_pids[n_test_pid + n_dev_pid :]:
+        pid_to_split[pid] = "train"
+
+    splits: dict[str, list[dict]] = {"train": [], "dev": [], "test": []}
+    for rec in all_records:
+        # relevant_ids holds exactly one pid (constructed above); take the first.
+        pid = rec["relevant_ids"][0]
+        splits[pid_to_split[pid]].append(rec)
+
+    # Shuffle within each split so the QA order is independent of the underlying
+    # passage iteration order from HuggingFace (which is grouped by title/document).
+    for split in splits.values():
+        rng.shuffle(split)
 
     passage_list = [{"id": pid, "passage": text} for pid, text in passages.items()]
     _save_jsonl(passage_list, out_dir / "dangdocao_passages.jsonl")
@@ -144,8 +164,19 @@ def process_dangdocao(out_dir: Path, dev_ratio: float = 0.1, test_ratio: float =
         clean = [{k: v for k, v in r.items() if k != "_domain"} for r in records]
         _save_jsonl(clean, out_dir / f"dangdocao_{split}.jsonl")
 
+    # Sanity: assert no passage leakage across splits.
+    pids_per_split = {s: {r["relevant_ids"][0] for r in records} for s, records in splits.items()}
+    leak_train_test = pids_per_split["train"] & pids_per_split["test"]
+    leak_train_dev  = pids_per_split["train"] & pids_per_split["dev"]
+    leak_dev_test   = pids_per_split["dev"]   & pids_per_split["test"]
+    assert not (leak_train_test or leak_train_dev or leak_dev_test), \
+        "Passage leakage detected after group-aware split — bug in pid_to_split"
+
     print(f"  Tổng passages: {len(passage_list):,}")
-    print(f"  Train/Dev/Test: {len(splits['train']):,} / {len(splits['dev']):,} / {len(splits['test']):,}")
+    print(f"  Passages per split (train/dev/test): "
+          f"{len(pids_per_split['train']):,} / {len(pids_per_split['dev']):,} / {len(pids_per_split['test']):,}")
+    print(f"  QAs per split    (train/dev/test): "
+          f"{len(splits['train']):,} / {len(splits['dev']):,} / {len(splits['test']):,}")
 
 
 # ---------------------------------------------------------------------------
