@@ -127,8 +127,10 @@ def build_samples(
     method: str,
     fixed_w: tuple[float, ...] | None,
     top_k: int,
-) -> list[SingleTurnSample]:
+) -> tuple[list[SingleTurnSample], list[str]]:
+    """Return (samples, sample_qa_ids) — qa_ids preserved for incremental runs."""
     samples = []
+    sample_ids: list[str] = []
     for qa in tqdm(qas, desc=f"  Retrieving+generating [{method}]"):
         query = qa["question"]
         ground_truth = qa["answers"][0] if qa.get("answers") else ""
@@ -152,7 +154,8 @@ def build_samples(
             retrieved_contexts=contexts,
             reference=ground_truth,
         ))
-    return samples
+        sample_ids.append(str(qa.get("id", "")))
+    return samples, sample_ids
 
 
 # ── Evaluate one method ────────────────────────────────────────────────────
@@ -161,7 +164,7 @@ def evaluate_method(
     samples: list[SingleTurnSample],
     ragas_llm,
     ragas_emb,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], dict[str, list[float | None]]]:
     """Score every sample against all four RAGAS metrics, return per-metric mean.
 
     RAGAS 0.4.3 split metrics into modern `collections.*` classes that take
@@ -198,6 +201,14 @@ def evaluate_method(
             return dict(user_input=s.user_input, response=s.response)
         raise ValueError(name)
 
+    # Per-sample raw scores, aligned to the samples list (None on failure).
+    per_sample: dict[str, list[float | None]] = {
+        "context_precision": [],
+        "context_recall":    [],
+        "faithfulness":      [],
+        "answer_relevancy":  [],
+    }
+
     for s in tqdm(samples, desc="  RAGAS scoring"):
         for name, metric in [
             ("context_precision", cp),
@@ -205,19 +216,22 @@ def evaluate_method(
             ("faithfulness",      fa),
             ("answer_relevancy",  ar),
         ]:
+            val_to_record: float | None = None
             try:
                 result = metric.score(**_kw_for(name, s))
                 val = getattr(result, "value", None)
-                if val is None or (isinstance(val, float) and (val != val)):  # NaN check
-                    continue
-                scores[name].append(float(val))
+                if val is not None and not (isinstance(val, float) and val != val):
+                    val_to_record = float(val)
+                    scores[name].append(val_to_record)
             except Exception as e:
                 print(f"    [warn] {name} failed on a sample: {type(e).__name__}: {e}", flush=True)
+            per_sample[name].append(val_to_record)
 
-    return {
+    means = {
         name: round(sum(vals) / len(vals), 4) if vals else float("nan")
         for name, vals in scores.items()
     }
+    return means, per_sample
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
@@ -239,6 +253,10 @@ def main() -> None:
                         help="Disable sparse retriever (run 2-way only)")
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--output",      default=None)
+    parser.add_argument("--exclude-ids", default=None,
+                        help="Path to a JSON list of QA ids to exclude from sampling. "
+                             "Used by extend-to-N orchestrators to skip queries "
+                             "already evaluated in an earlier run.")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -247,6 +265,16 @@ def main() -> None:
     with open(args.qas_path, encoding="utf-8") as f:
         qas = [json.loads(l) for l in f if l.strip()]
     qas = [q for q in qas if q.get("answers") and q["answers"][0]]
+
+    # Apply exclusion BEFORE sampling so the resampled set is disjoint from prior runs.
+    if args.exclude_ids:
+        with open(args.exclude_ids, encoding="utf-8") as f:
+            exclude = set(json.load(f))
+        before = len(qas)
+        qas = [q for q in qas if str(q.get("id", "")) not in exclude]
+        print(f"Excluded {before - len(qas)} previously-evaluated qa_ids "
+              f"(from {args.exclude_ids}); {len(qas)} remain.")
+
     if args.n_samples < len(qas):
         qas = random.sample(qas, args.n_samples)
     print(f"Evaluating {len(qas)} samples with RAGAS")
@@ -298,6 +326,8 @@ def main() -> None:
     selected_methods = [m.strip() for m in args.methods.split(",")]
     all_results: dict[str, dict] = {}
 
+    per_sample_all: dict[str, dict] = {}
+
     for method in selected_methods:
         fixed_w = METHODS.get(method)
         use_mlp = (fixed_w is None and method == "dynamic_mlp")
@@ -306,7 +336,7 @@ def main() -> None:
             continue
 
         print(f"\n[{method}]")
-        samples = build_samples(
+        samples, sample_ids = build_samples(
             qas, hybrid, passages_map, mlp,
             method=method,
             fixed_w=fixed_w if not use_mlp else None,
@@ -317,8 +347,9 @@ def main() -> None:
             continue
 
         print(f"  Running RAGAS on {len(samples)} samples…")
-        metrics = evaluate_method(samples, ragas_llm, ragas_emb)
+        metrics, per_sample = evaluate_method(samples, ragas_llm, ragas_emb)
         all_results[method] = metrics
+        per_sample_all[method] = {"qa_ids": sample_ids, "scores": per_sample}
         print(f"  {metrics}")
 
     # Print summary table
@@ -335,8 +366,13 @@ def main() -> None:
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as f:
-            json.dump({"results": all_results, "n_samples": len(qas),
-                       "qas_path": args.qas_path}, f, indent=2, ensure_ascii=False)
+            json.dump({
+                "results":    all_results,
+                "n_samples":  len(qas),
+                "qas_path":   args.qas_path,
+                "seed":       args.seed,
+                "per_sample": per_sample_all,
+            }, f, indent=2, ensure_ascii=False)
         print(f"\nSaved → {args.output}")
 
 
