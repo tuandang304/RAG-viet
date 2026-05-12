@@ -127,9 +127,7 @@ def build_samples(
     method: str,
     fixed_w: tuple[float, ...] | None,
     top_k: int,
-    bm25_vocab: set[str] | None = None,
-) -> tuple[list[SingleTurnSample], list[str]]:
-    """Return (samples, sample_qa_ids) — qa_ids preserved for incremental runs."""
+) -> list[SingleTurnSample]:
     samples = []
     sample_ids: list[str] = []
     for qa in tqdm(qas, desc=f"  Retrieving+generating [{method}]"):
