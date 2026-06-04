@@ -127,6 +127,7 @@ def build_samples(
     method: str,
     fixed_w: tuple[float, ...] | None,
     top_k: int,
+    bm25_vocab: set[str] | None = None,
 ) -> tuple[list[SingleTurnSample], list[str]]:
     """Return (samples, sample_qa_ids) — qa_ids preserved for incremental runs."""
     samples = []
@@ -140,7 +141,7 @@ def build_samples(
         if fixed_w is not None:
             weights = fixed_w
         else:
-            weights = mlp.predict_weights(extract_features(query))
+            weights = mlp.predict_weights(extract_features(query, bm25_vocab=bm25_vocab))
 
         contexts = retrieve_contexts(hybrid, passages_map, query, weights, top_k)
         if not contexts:
@@ -314,6 +315,7 @@ def main() -> None:
 
     dense  = DenseRetriever.load(args.index_dir)
     bm25   = BM25Retriever.load(str(Path(args.index_dir) / "bm25.pkl"))
+    bm25_vocab = set(bm25._bm25.idf.keys())
     hybrid = HybridRetriever(dense, bm25, sparse=sparse)
     mlp    = FusionMLP.load(args.mlp_path)
 
@@ -341,6 +343,7 @@ def main() -> None:
             method=method,
             fixed_w=fixed_w if not use_mlp else None,
             top_k=args.top_k,
+            bm25_vocab=bm25_vocab,
         )
         if not samples:
             print("  No valid samples, skipping")

@@ -200,6 +200,7 @@ def run_eval(
     }
     feat_idx = {name: i for i, name in enumerate(FEATURE_NAMES)}
     feat_rows: list[np.ndarray] = []
+    bm25_vocab = set(bm25_r._bm25.idf.keys())
 
     # Weight accumulators (MLP 3-way)
     w_dense_list:  list[float] = []
@@ -212,7 +213,7 @@ def run_eval(
         query    = qa["question"]
         relevant = set(qa["relevant_ids"])
 
-        features = extract_features(query)
+        features = extract_features(query, bm25_vocab=bm25_vocab)
         feat_rows.append(features)
 
         # MLP inference + timing
@@ -282,7 +283,7 @@ def run_eval(
 
     # ── 3. Efficiency ─────────────────────────────────────────────────────────
     efficiency = {
-        "mlp_params": sum(p.numel() for p in mlp.parameters()),
+        "mlp_params": mlp.net.count_params(),
         "mlp_inference_us": {
             "mean": _r2(np.mean(mlp_us)),
             "std":  _r2(np.std(mlp_us)),
@@ -526,7 +527,7 @@ def main() -> None:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
-        print(f"Saved → {args.output}")
+        print(f"Saved -> {args.output}")
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ CKPT_DIR   = ROOT / "checkpoints"
 RESULTS    = ROOT / "results" / "3way_full"
 DATA       = ROOT / "data" / "processed"
 
-CHECKPOINT = CKPT_DIR / "fusion_mlp_3way_full.pt"
+CHECKPOINT = CKPT_DIR / "fusion_mlp_3way_full.keras"
 EMB_CACHE  = CKPT_DIR / "train_aug_embeddings.npy"
 
 
@@ -49,6 +49,7 @@ _SUBPROC_ENV = {
     "OMP_NUM_THREADS":      "1",
     "MKL_NUM_THREADS":      "1",
     "PYTHONUNBUFFERED":     "1",
+    "PYTHONIOENCODING":     "utf-8",
 }
 
 
@@ -69,25 +70,16 @@ def step_build_sparse(force: bool) -> None:
     sparse_pkl = INDEX_DIR / "sparse.pkl"
     faiss_idx  = INDEX_DIR / "index.faiss"
     bm25_pkl   = INDEX_DIR / "bm25.pkl"
-    if sparse_pkl.exists() and not force:
-        print(f"[SKIP] sparse.pkl already at {sparse_pkl} ({sparse_pkl.stat().st_size / 1e6:.1f} MB)")
+    if sparse_pkl.exists() and faiss_idx.exists() and bm25_pkl.exists() and not force:
+        print(f"[SKIP] All indexes already exist at {INDEX_DIR}")
         return
-    if not (faiss_idx.exists() and bm25_pkl.exists()):
-        sys.exit(
-            f"[FAIL] FAISS / BM25 index missing in {INDEX_DIR}. "
-            "Run `uv run python scripts/build_index.py --no-sparse ...` first, "
-            "or remove `--no-sparse` to build everything from scratch."
-        )
-    # build_index.py rebuilds all three signals. To preserve existing FAISS/BM25
-    # we simply re-run the script; it overwrites those files with identical content
-    # (deterministic given the same passages.jsonl).
     run_step(
         [
             "uv", "run", "python", "scripts/build_index.py",
             "--data-path", str(DATA / "viaquad_passages.jsonl"),
             "--index-dir", str(INDEX_DIR),
         ],
-        "Step 1/3 — Build BGE-M3 sparse index (downloads ~570 MB on first run)",
+        "Step 1/3 — Build FAISS, BM25, and BGE-M3 sparse indexes",
     )
 
 

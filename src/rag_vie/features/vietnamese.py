@@ -27,6 +27,7 @@ FEATURE_NAMES = [
     "clause_count_norm",      # số mệnh đề (proxy cho multi-hop)
     "has_question_word",      # có từ để hỏi
     "query_length_norm",      # độ dài query (chuẩn hoá)
+    "oov_ratio",              # tỉ lệ token không có trong BM25 vocab
 ]
 
 
@@ -34,9 +35,11 @@ def _has_diacritic(token: str) -> bool:
     return bool(_TONED_PATTERN.search(token))
 
 
-def extract_features(query: str) -> np.ndarray:
+def extract_features(query: str, bm25_vocab: set[str] | None = None) -> np.ndarray:
     """Extract Vietnamese-aware features from a query string.
     Returns a 1-D float32 array of length len(FEATURE_NAMES).
+    bm25_vocab: set of tokens in the BM25 corpus vocabulary (from BM25Okapi.idf.keys()).
+                When provided, enables OOV ratio calculation; otherwise oov_ratio=0.0.
     """
     syllables = query.strip().split()
     total_syl = max(len(syllables), 1)
@@ -67,8 +70,16 @@ def extract_features(query: str) -> np.ndarray:
     # 7. Query length, normalized at 20 syllables
     query_length_norm = min(total_syl / 20.0, 1.0)
 
+    # 8. OOV ratio: fraction of BM25-tokenized query tokens absent from corpus vocab.
+    #    Uses the same word_tokenize segmentation as BM25Retriever._tokenize().
+    #    Returns 0.0 when bm25_vocab is not provided (e.g. at inference without index).
+    if bm25_vocab is not None:
+        oov_ratio = sum(1 for w in words if w not in bm25_vocab) / max(len(words), 1)
+    else:
+        oov_ratio = 0.0
+
     return np.array(
         [diacritic_ratio, compound_ratio, english_ratio, tech_term_ratio,
-         clause_count_norm, has_question_word, query_length_norm],
+         clause_count_norm, has_question_word, query_length_norm, oov_ratio],
         dtype=np.float32,
     )

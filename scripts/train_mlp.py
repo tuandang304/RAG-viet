@@ -27,6 +27,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
+import pyarrow  # noqa: F401
 import argparse
 import json
 import random
@@ -44,7 +45,7 @@ from tqdm import tqdm
 # Two-way:   edge of simplex where c=0, step = 0.1 → 11 points (a, b, 0) with a+b=1
 #            (used when sparse retriever is unavailable so the soft-label target
 #             does not leak weight onto a dead signal — see Issue #3 in review)
-_N = 10
+_N = 20
 WEIGHT_GRID_3WAY: list[tuple[float, float, float]] = [
     (i / _N, j / _N, (_N - i - j) / _N)
     for i in range(_N + 1)
@@ -59,11 +60,8 @@ TOP_K = 100
 # ── Train-only subprocess ─────────────────────────────────────────────────────
 
 def _train_only_mode() -> None:
-    """Load X/Y .npz, train MLP, save checkpoint. Isolated from FAISS."""
-    import torch
-    import torch.nn as nn
-    from torch.utils.data import DataLoader, TensorDataset
-
+    """Load X/Y .npz, train MLP with Keras, save checkpoint. Isolated from FAISS."""
+    import keras
     from rag_vie.fusion.mlp import FusionMLP
 
     parser = argparse.ArgumentParser()
@@ -76,15 +74,13 @@ def _train_only_mode() -> None:
     parser.add_argument("--seed",       type=int,   default=42)
     args = parser.parse_args()
 
-    torch.manual_seed(args.seed)
+    keras.utils.set_random_seed(args.seed)
+
     data = np.load(args.xy_path)
     X, Y = data["X"].astype(np.float32), data["Y"].astype(np.float32)
     output_dim = Y.shape[1]
     print(f"Training pairs: {len(X)}  |  feature dim: {X.shape[1]}  |  output dim: {output_dim}", flush=True)
-    print(f"Mean weights — dense: {Y[:, 0].mean():.3f}  bm25: {Y[:, 1].mean():.3f}  sparse: {Y[:, 2].mean():.3f}", flush=True)
-
-    X_t, Y_t = torch.from_numpy(X), torch.from_numpy(Y)
-    loader = DataLoader(TensorDataset(X_t, Y_t), batch_size=args.batch_size, shuffle=True, num_workers=0)
+    print(f"Mean weights - dense: {Y[:, 0].mean():.3f}  bm25: {Y[:, 1].mean():.3f}  sparse: {Y[:, 2].mean():.3f}", flush=True)
 
     if args.init_from:
         print(f"  Fine-tuning from: {args.init_from}", flush=True)
@@ -92,26 +88,18 @@ def _train_only_mode() -> None:
     else:
         mlp = FusionMLP(input_dim=X.shape[1], output_dim=output_dim)
 
-    optimizer = torch.optim.Adam(mlp.parameters(), lr=args.lr)
-    criterion = nn.MSELoss()
+    mlp.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=args.lr),
+        loss=keras.losses.MeanSquaredError(),
+    )
 
-    print(f"\nTraining MLP ({args.epochs} epochs, lr={args.lr})…", flush=True)
-    mlp.train()
-    for epoch in range(1, args.epochs + 1):
-        total_loss = 0.0
-        for xb, yb in loader:
-            optimizer.zero_grad()
-            loss = criterion(mlp(xb), yb)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item() * len(xb)
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"  Epoch {epoch:3d}/{args.epochs} — MSE loss: {total_loss / len(X):.6f}", flush=True)
+    print(f"\nTraining MLP ({args.epochs} epochs, lr={args.lr})...", flush=True)
+    mlp.fit(X, Y, epochs=args.epochs, batch_size=args.batch_size, verbose=1)
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     mlp.save(out_path)
-    print(f"\nCheckpoint saved → {out_path}", flush=True)
+    print(f"\nCheckpoint saved -> {out_path}", flush=True)
 
 
 if "--train-only" in sys.argv:
@@ -216,11 +204,12 @@ def collect_training_pairs(
     """
     # Phase 1: BM25 + features
     print("  Phase 1/4: BM25 search + feature extraction…")
+    bm25_vocab = set(bm25._bm25.idf.keys())
     bm25_results:     list[list[tuple[str, str, float]]] = []
     features_list:    list[np.ndarray] = []
     for qa in tqdm(qas, desc="  BM25+feat"):
         bm25_results.append(bm25.search(qa["question"], TOP_K))
-        features_list.append(extract_features(qa["question"]))
+        features_list.append(extract_features(qa["question"], bm25_vocab=bm25_vocab))
 
     # Phase 2: Sparse search (PyTorch — must come BEFORE faiss.normalize_L2)
     sparse_results: list[dict[str, float]] = []
