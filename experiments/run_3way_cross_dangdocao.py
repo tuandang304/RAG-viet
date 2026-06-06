@@ -34,7 +34,7 @@ ROOT       = Path(__file__).resolve().parents[1]
 INDEX_DIR  = ROOT / "indexes" / "dangdocao"
 DATA       = ROOT / "data" / "processed"
 RESULTS    = ROOT / "results" / "3way_cross_dangdocao"
-CHECKPOINT = ROOT / "checkpoints" / "fusion_mlp_3way_full.pt"  # trained on ViQuAD
+CHECKPOINT = ROOT / "checkpoints" / "fusion_mlp_3way_full.keras"  # trained on ViQuAD
 
 
 _SUBPROC_ENV = {
@@ -43,6 +43,7 @@ _SUBPROC_ENV = {
     "OMP_NUM_THREADS":      "1",
     "MKL_NUM_THREADS":      "1",
     "PYTHONUNBUFFERED":     "1",
+    "PYTHONIOENCODING":     "utf-8",
 }
 
 
@@ -72,9 +73,10 @@ def step_download(force: bool) -> None:
 
 def step_build_index(force: bool) -> None:
     sparse_pkl = INDEX_DIR / "sparse.pkl"
-    if sparse_pkl.exists() and not force:
-        size_mb = sparse_pkl.stat().st_size / 1e6
-        print(f"[SKIP] DANGDOCAO sparse.pkl already at {sparse_pkl} ({size_mb:.1f} MB)")
+    faiss_idx  = INDEX_DIR / "index.faiss"
+    bm25_pkl   = INDEX_DIR / "bm25.pkl"
+    if sparse_pkl.exists() and faiss_idx.exists() and bm25_pkl.exists() and not force:
+        print(f"[SKIP] All DANGDOCAO indexes already exist at {INDEX_DIR}")
         return
     run_step(
         [
@@ -82,7 +84,7 @@ def step_build_index(force: bool) -> None:
             "--data-path", str(DATA / "dangdocao_passages.jsonl"),
             "--index-dir", str(INDEX_DIR),
         ],
-        "Step 2/4 — Build DANGDOCAO index (FAISS + BM25 + BGE-M3 sparse, ~37k passages)",
+        "Step 2/4 — Build DANGDOCAO index (FAISS, BM25, and BGE-M3 sparse)",
     )
 
 

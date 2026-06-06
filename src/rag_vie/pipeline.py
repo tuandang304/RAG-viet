@@ -33,9 +33,12 @@ class RAGPipeline:
         self._hybrid = HybridRetriever(dense, bm25, sparse)
         self._mlp = fusion_mlp
         self._use_generator = use_generator
+        self._bm25_vocab: set[str] | None = (
+            set(bm25._bm25.idf.keys()) if bm25._bm25 is not None else None
+        )
 
     def run(self, query: str) -> RAGResult:
-        features = extract_features(query)
+        features = extract_features(query, bm25_vocab=self._bm25_vocab)
         weights = self._mlp.predict_weights(features)   # (a, b, c)
 
         retrieved = self._hybrid.retrieve(
