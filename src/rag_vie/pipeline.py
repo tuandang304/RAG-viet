@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import settings
+from .features.combined import combine
+from .features.signal import extract_signal_features
 from .features.vietnamese import extract_features
 from .fusion.mlp import FusionMLP
 from .generator.llm import generate
@@ -33,21 +35,25 @@ class RAGPipeline:
         self._hybrid = HybridRetriever(dense, bm25, sparse)
         self._mlp = fusion_mlp
         self._use_generator = use_generator
-        self._bm25_vocab: set[str] | None = (
-            set(bm25._bm25.idf.keys()) if bm25._bm25 is not None else None
+        self._bm25_idf: dict[str, float] | None = (
+            bm25._bm25.idf if bm25._bm25 is not None else None
         )
 
     def run(self, query: str) -> RAGResult:
-        features = extract_features(query, bm25_vocab=self._bm25_vocab)
-        weights = self._mlp.predict_weights(features)   # (a, b, c)
-
-        retrieved = self._hybrid.retrieve(
+        # Retrieve candidates first so the MLP can condition on inter-retriever agreement.
+        candidates = self._hybrid.retrieve_candidates(
             query=query,
-            weights=weights,
             k_dense=settings.top_k_dense,
             k_bm25=settings.top_k_bm25,
-            k_final=settings.top_k_final,
         )
+        query_feats = extract_features(query, bm25_idf=self._bm25_idf)
+        signal_feats = extract_signal_features(
+            candidates.dense_norm, candidates.bm25_norm, candidates.sparse_norm
+        )
+        features = combine(query_feats, signal_feats)
+        weights = self._mlp.predict_weights(features)   # (a, b, c)
+
+        retrieved = self._hybrid.fuse(candidates, weights, settings.top_k_final)
 
         answer = ""
         if self._use_generator:

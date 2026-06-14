@@ -1,7 +1,17 @@
+import re
+
 from openai import OpenAI
 from ..config import settings
 
 _client: OpenAI | None = None
+
+# Qwen3 is a reasoning model and may wrap its chain-of-thought in <think>…</think>.
+# Strip it so the returned answer (and any RAGAS scoring) sees only the final response.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_think(text: str) -> str:
+    return _THINK_RE.sub("", text).strip()
 
 _SYSTEM_PROMPT = (
     "Bạn là trợ lý AI hữu ích. Dựa vào các đoạn văn được cung cấp, "
@@ -31,4 +41,4 @@ def generate(query: str, passages: list[str], max_tokens: int = 512) -> str:
         max_tokens=max_tokens,
         temperature=0.1,
     )
-    return response.choices[0].message.content or ""
+    return _strip_think(response.choices[0].message.content or "")

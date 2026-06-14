@@ -4,15 +4,15 @@ import keras
 from keras import layers
 from pathlib import Path
 
-from ..features.vietnamese import FEATURE_NAMES
+from ..features.combined import ALL_FEATURE_NAMES
 
-_INPUT_DIM = len(FEATURE_NAMES)
+_INPUT_DIM = len(ALL_FEATURE_NAMES)
 
 
 class FusionMLP(keras.Model):
     """Lightweight MLP that predicts three-way fusion weights.
 
-    Input:  Vietnamese-aware feature vector (dim = len(FEATURE_NAMES) = 8)
+    Input:  query features + signal-aware features (dim = len(ALL_FEATURE_NAMES))
     Output: 3-dim softmax → (w_dense, w_bm25, w_sparse)
 
     Architecture: Dense(64) → LayerNorm → GELU → Dropout(0.1)

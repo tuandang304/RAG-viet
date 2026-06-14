@@ -2,16 +2,17 @@
 
 ---
 
-> ⚠️ **REPRODUCIBILITY NOTE (remove before submission).**
-> The **method sections (§1–§4) describe the current codebase**: an **eight-feature**
-> query representation (adds `oov_ratio`) and a **Keras/TensorFlow** fusion MLP
-> (`Dense(64)→LayerNorm→GELU→Dropout→Dense(32)→LayerNorm→GELU→Dropout→Dense(3)`,
-> **≈2,947 parameters**) trained on a **231-point** simplex grid (step 0.05).
-> **All empirical results in §5 were produced by an earlier configuration**
-> (seven features, a plain `Linear(7→64→32→3)+ReLU` PyTorch MLP of ≈2,691 parameters,
-> 66-point simplex grid at step 0.1). **The result tables, the efficiency numbers,
-> and the interpretability correlations must be regenerated with the current code
-> before submission**, after which this note and any "(earlier run)" markers can be deleted.
+> ⚠️ **REPRODUCIBILITY NOTE (remove before submission).** The codebase has moved ahead
+> of every number in this draft. **The current implementation uses a 20-dimensional input**:
+> **13 linguistic query features** (the original 7 + `oov_ratio` + IDF specificity `avg_idf`/`max_idf`
+> + structural `digit`/`proper_noun`/`acronym`) concatenated with **7 signal-aware features**
+> computed from the retrieved candidate sets (pairwise top-k overlap, per-source score sharpness,
+> top-1 agreement), feeding a **Keras/TensorFlow** MLP (`Dense(64)→LN→GELU→Dropout→Dense(32)→LN→GELU→Dropout→Dense(3)`,
+> **≈3,715 parameters**) trained on a **231-point** simplex grid (step 0.05) with an optional KL-divergence loss.
+> The §3–§4 prose still describes the **8-feature** intermediate design, and **all §5 results were produced
+> by the original configuration** (seven features, `Linear(7→64→32→3)+ReLU` PyTorch MLP, 66-point grid).
+> **The methodology text and every result/efficiency/correlation table must be regenerated against the
+> current code before submission.**
 
 ---
 

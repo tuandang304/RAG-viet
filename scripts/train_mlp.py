@@ -71,6 +71,7 @@ def _train_only_mode() -> None:
     parser.add_argument("--epochs",     type=int,   default=100)
     parser.add_argument("--batch-size", type=int,   default=256)
     parser.add_argument("--lr",         type=float, default=1e-3)
+    parser.add_argument("--loss",       choices=["mse", "kl"], default="mse")
     parser.add_argument("--seed",       type=int,   default=42)
     args = parser.parse_args()
 
@@ -88,12 +89,16 @@ def _train_only_mode() -> None:
     else:
         mlp = FusionMLP(input_dim=X.shape[1], output_dim=output_dim)
 
+    # KL-divergence treats both prediction and (simplex) target as distributions,
+    # rewarding the model for matching the *shape* of the soft label rather than its
+    # exact coordinates — empirically widens the predicted-weight distribution.
+    loss_fn = keras.losses.KLDivergence() if args.loss == "kl" else keras.losses.MeanSquaredError()
     mlp.compile(
         optimizer=keras.optimizers.Adam(learning_rate=args.lr),
-        loss=keras.losses.MeanSquaredError(),
+        loss=loss_fn,
     )
 
-    print(f"\nTraining MLP ({args.epochs} epochs, lr={args.lr})...", flush=True)
+    print(f"\nTraining MLP ({args.epochs} epochs, lr={args.lr}, loss={args.loss})...", flush=True)
     mlp.fit(X, Y, epochs=args.epochs, batch_size=args.batch_size, verbose=1)
 
     out_path = Path(args.output)
@@ -113,6 +118,8 @@ if "--train-only" in sys.argv:
 
 import faiss  # noqa: E402
 
+from rag_vie.features.combined import combine             # noqa: E402
+from rag_vie.features.signal import extract_signal_features  # noqa: E402
 from rag_vie.features.vietnamese import extract_features  # noqa: E402
 from rag_vie.retrieval.bm25 import BM25Retriever          # noqa: E402
 from rag_vie.retrieval.dense import DenseRetriever         # noqa: E402
@@ -188,14 +195,14 @@ def collect_training_pairs(
       3 — FAISS dense batch search
       4 — 3D soft-label grid search (pure numpy)
     """
-    # Phase 1: BM25 + features
+    # Phase 1: BM25 + query features
     print("  Phase 1/4: BM25 search + feature extraction…")
-    bm25_vocab = set(bm25._bm25.idf.keys())
+    bm25_idf = bm25._bm25.idf
     bm25_results:     list[list[tuple[str, str, float]]] = []
     features_list:    list[np.ndarray] = []
     for qa in tqdm(qas, desc="  BM25+feat"):
         bm25_results.append(bm25.search(qa["question"], TOP_K))
-        features_list.append(extract_features(qa["question"], bm25_vocab=bm25_vocab))
+        features_list.append(extract_features(qa["question"], bm25_idf=bm25_idf))
 
     # Phase 2: Sparse search (PyTorch — must come BEFORE faiss.normalize_L2)
     sparse_results: list[dict[str, float]] = []
@@ -243,7 +250,11 @@ def collect_training_pairs(
             temperature, include_sparse=include_sparse, hard_label=hard_label,
         )
 
-        X_list.append(features_list[i])
+        # Signal-aware features from the normalized candidate scores (same as eval/inference).
+        signal_feats = extract_signal_features(
+            _minmax(dense_scores), _minmax(bm25_scores), _minmax(sparse_scores)
+        )
+        X_list.append(combine(features_list[i], signal_feats))
         Y_list.append([a, b, c])
 
     return np.array(X_list, dtype=np.float32), np.array(Y_list, dtype=np.float32)
@@ -258,6 +269,7 @@ def spawn_train_mlp(
     lr: float,
     seed: int,
     init_from: str | None = None,
+    loss: str = "mse",
 ) -> None:
     """Save X/Y then re-spawn this script with --train-only (fresh process, no FAISS)."""
     with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
@@ -271,6 +283,7 @@ def spawn_train_mlp(
             "--epochs", str(epochs),
             "--batch-size", str(batch_size),
             "--lr", str(lr),
+            "--loss", loss,
             "--seed", str(seed),
         ]
         if init_from:
@@ -291,7 +304,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--qas-path",   default="data/processed/viaquad_train_aug.jsonl")
     parser.add_argument("--index-dir",  default="indexes/viaquad")
-    parser.add_argument("--output",     default="checkpoints/fusion_mlp_aug.pt")
+    parser.add_argument("--output",     default="checkpoints/fusion_mlp_aug.keras")
     parser.add_argument("--emb-cache",  default=None,
                         help="Cache path for query embeddings (avoids re-calling FPT API)")
     parser.add_argument("--sparse-path", default=None,
@@ -304,6 +317,9 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int,   default=256)
     parser.add_argument("--lr",         type=float, default=1e-3)
     parser.add_argument("--temperature", type=float, default=0.3)
+    parser.add_argument("--loss",       choices=["mse", "kl"], default="mse",
+                        help="Training loss against the soft-label simplex target "
+                             "(kl widens the predicted-weight distribution).")
     parser.add_argument("--hard-label",  action="store_true",
                         help="Use argmax over the simplex grid instead of "
                              "temperature-scaled soft expectation (§5.6 ablation).")
@@ -364,7 +380,8 @@ def main() -> None:
 
     # Spawn training subprocess (fresh process — no FAISS OMP conflict with PyTorch)
     print("\nSpawning training subprocess…", flush=True)
-    spawn_train_mlp(X, Y, args.output, args.epochs, args.batch_size, args.lr, args.seed, args.init_from)
+    spawn_train_mlp(X, Y, args.output, args.epochs, args.batch_size, args.lr, args.seed,
+                    args.init_from, loss=args.loss)
 
 
 if __name__ == "__main__":

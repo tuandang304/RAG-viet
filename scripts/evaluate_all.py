@@ -3,7 +3,8 @@
 Metric groups:
   1. Retrieval   — NDCG@10, MRR@10, MAP@10, Recall@10, Recall@100, Hit@1
   2. Significance — paired t-test, Wilcoxon signed-rank, 95% bootstrap CI
-  3. Efficiency  — MLP param count, index sizes, MLP inference latency
+  3. Efficiency  — MLP param count, index sizes, MLP inference latency,
+                   retrieval+fusion latency (p50/p95) and throughput
   4. Weights     — entropy, distribution stats, Pearson correlations
   + Stratified analysis (11 query-feature strata)
 
@@ -41,10 +42,12 @@ from scipy import stats as sp_stats
 from tqdm import tqdm
 
 from rag_vie.config import settings
+from rag_vie.features.combined import combine
+from rag_vie.features.signal import extract_signal_features
 from rag_vie.features.vietnamese import FEATURE_NAMES, extract_features
 from rag_vie.fusion.mlp import FusionMLP
 from rag_vie.retrieval.bm25 import BM25Retriever
-from rag_vie.retrieval.embedder import embed_query
+from rag_vie.retrieval.embedder import embed_texts
 from rag_vie.utils.fusion import fuse_scores
 from rag_vie.utils.metrics import (
     hit_at_1,
@@ -114,6 +117,36 @@ def fuse(
     return [p for p, _ in sorted(scored.items(), key=lambda x: x[1], reverse=True)[:k_final]]
 
 
+def _ranks(scores: dict[str, float]) -> dict[str, int]:
+    """id → 0-based rank within a source (descending score)."""
+    return {pid: r for r, (pid, _) in
+            enumerate(sorted(scores.items(), key=lambda x: x[1], reverse=True))}
+
+
+def fuse_rrf(
+    dense_norm:  dict[str, float],
+    bm25_norm:   dict[str, float],
+    sparse_norm: dict[str, float],
+    k_final: int,
+    k_rrf: int = 60,
+) -> list[str]:
+    """Reciprocal Rank Fusion (parameter-free hybrid baseline): score = Σ 1/(k_rrf + rank)."""
+    ranks = [_ranks(s) for s in (dense_norm, bm25_norm, sparse_norm) if s]
+    ids = set().union(*[set(r) for r in ranks]) if ranks else set()
+    scored = {
+        pid: sum(1.0 / (k_rrf + r[pid]) for r in ranks if pid in r)
+        for pid in ids
+    }
+    return [p for p, _ in sorted(scored.items(), key=lambda x: x[1], reverse=True)[:k_final]]
+
+
+# Coarse simplex grid (step 0.1, 66 points) used only for the per-query ORACLE upper bound.
+_ORACLE_GRID: list[tuple[float, float, float]] = [
+    (i / 10, j / 10, (10 - i - j) / 10)
+    for i in range(11) for j in range(11 - i)
+]
+
+
 # ── Statistics ────────────────────────────────────────────────────────────────
 
 def bootstrap_ci(
@@ -157,13 +190,15 @@ def run_eval(
     sparse_r=None,   # SparseRetriever | None
     k_sparse:  int = 100,
 ) -> dict:
+    # rrf = parameter-free hybrid baseline; oracle = per-query best simplex point (headroom).
+    method_names = list(METHODS) + ["rrf", "oracle"]
     per_query: dict[str, dict[str, list]] = {
         m: {mt: [] for mt in ("ndcg10", "mrr10", "map10", "rec10", "rec100", "hit1")}
-        for m in METHODS
+        for m in method_names
     }
     feat_idx = {name: i for i, name in enumerate(FEATURE_NAMES)}
-    feat_rows: list[np.ndarray] = []
-    bm25_vocab = set(bm25_r._bm25.idf.keys())
+    feat_rows: list[np.ndarray] = []          # query-only features (for strata/correlation)
+    bm25_idf = bm25_r._bm25.idf
 
     # Weight accumulators (MLP 3-way)
     w_dense_list:  list[float] = []
@@ -171,29 +206,32 @@ def run_eval(
     w_sparse_list: list[float] = []
     entropies:     list[float] = []
     mlp_us:        list[float] = []
+    e2e_ms:        list[float] = []           # retrieval+fusion latency (excl. embedding API)
 
-    for qa in tqdm(qas, desc="Evaluating"):
+    def _record(method: str, ranked: list[str], relevant: set[str]) -> None:
+        acc = per_query[method]
+        acc["ndcg10"].append(ndcg_at_k(ranked, relevant, 10))
+        acc["mrr10"].append(mrr_at_k(ranked, relevant, 10))
+        acc["map10"].append(map_at_k(ranked, relevant, 10))
+        acc["rec10"].append(recall_at_k(ranked, relevant, 10))
+        acc["rec100"].append(recall_at_k(ranked, relevant, 100))
+        acc["hit1"].append(hit_at_1(ranked, relevant))
+
+    # Batch pre-embed all queries once (avoids per-query FPT API round-trips).
+    queries = [qa["question"] for qa in qas]
+    print(f"Embedding {len(queries):,} queries via FPT API (batched)…", flush=True)
+    qembs = embed_texts(queries, batch_size=32)
+
+    for i, qa in enumerate(tqdm(qas, desc="Evaluating")):
         query    = qa["question"]
         relevant = set(qa["relevant_ids"])
 
-        features = extract_features(query, bm25_vocab=bm25_vocab)
-        feat_rows.append(features)
+        qfeats = extract_features(query, bm25_idf=bm25_idf)
+        feat_rows.append(qfeats)
 
-        # MLP inference + timing
-        t0    = time.perf_counter()
-        w_mlp = mlp.predict_weights(features)   # (w_dense, w_bm25, w_sparse)
-        mlp_us.append((time.perf_counter() - t0) * 1e6)
-
-        w_dense_list.append(float(w_mlp[0]))
-        w_bm25_list.append(float(w_mlp[1]))
-        w_sparse_list.append(float(w_mlp[2]) if len(w_mlp) > 2 else 0.0)
-
-        eps = 1e-9
-        entropies.append(float(-sum(w * np.log(w + eps) for w in w_mlp)))
-
-        # Retrieve once per source, shared across all methods
-        qemb   = embed_query(query)
-        d_hits = dense.search(qemb, k_dense)
+        # ── Timed MLP path: retrieval + signal features + weight prediction + fusion ──
+        t0     = time.perf_counter()
+        d_hits = dense.search(qembs[i:i + 1], k_dense)
         b_hits = bm25_r.search(query, k_bm25)
         s_hits = sparse_r.search(query, k_sparse) if sparse_r is not None else []
 
@@ -201,20 +239,37 @@ def run_eval(
         b_norm = _minmax({pid: s for pid, _, s in b_hits})
         s_norm = _minmax({pid: s for pid, _, s in s_hits})
 
+        sig_feats = extract_signal_features(d_norm, b_norm, s_norm)
+        feats     = combine(qfeats, sig_feats)
+
+        tw    = time.perf_counter()
+        w_mlp = mlp.predict_weights(feats)   # (w_dense, w_bm25, w_sparse)
+        mlp_us.append((time.perf_counter() - tw) * 1e6)
+
+        w = w_mlp if len(w_mlp) == 3 else (*w_mlp, 0.0)
+        ranked_mlp = fuse(d_norm, b_norm, s_norm, w, k_final)
+        e2e_ms.append((time.perf_counter() - t0) * 1e3)
+        _record("mlp", ranked_mlp, relevant)
+
+        w_dense_list.append(float(w_mlp[0]))
+        w_bm25_list.append(float(w_mlp[1]))
+        w_sparse_list.append(float(w_mlp[2]) if len(w_mlp) > 2 else 0.0)
+        eps = 1e-9
+        entropies.append(float(-sum(wt * np.log(wt + eps) for wt in w_mlp)))
+
+        # ── Untimed: fixed-weight baselines, RRF, and per-query oracle ──
         for method, fixed_w in METHODS.items():
             if fixed_w is None:
-                w = w_mlp if len(w_mlp) == 3 else (*w_mlp, 0.0)
-            else:
-                w = fixed_w
-            ranked = fuse(d_norm, b_norm, s_norm, w, k_final)
+                continue   # mlp already recorded
+            _record(method, fuse(d_norm, b_norm, s_norm, fixed_w, k_final), relevant)
 
-            acc = per_query[method]
-            acc["ndcg10"].append(ndcg_at_k(ranked, relevant, 10))
-            acc["mrr10"].append(mrr_at_k(ranked, relevant, 10))
-            acc["map10"].append(map_at_k(ranked, relevant, 10))
-            acc["rec10"].append(recall_at_k(ranked, relevant, 10))
-            acc["rec100"].append(recall_at_k(ranked, relevant, 100))
-            acc["hit1"].append(hit_at_1(ranked, relevant))
+        _record("rrf", fuse_rrf(d_norm, b_norm, s_norm, k_final), relevant)
+
+        best_w = max(
+            _ORACLE_GRID,
+            key=lambda gw: ndcg_at_k(fuse(d_norm, b_norm, s_norm, gw, k_final), relevant, 10),
+        )
+        _record("oracle", fuse(d_norm, b_norm, s_norm, best_w, k_final), relevant)
 
     features_arr = np.array(feat_rows, dtype=np.float32)
     w_d_arr = np.array(w_dense_list)
@@ -245,12 +300,21 @@ def run_eval(
     }
 
     # ── 3. Efficiency ─────────────────────────────────────────────────────────
+    e2e_arr = np.array(e2e_ms)
+    p50, p95 = (float(np.percentile(e2e_arr, 50)), float(np.percentile(e2e_arr, 95))) if len(e2e_arr) else (0.0, 0.0)
     efficiency = {
         "mlp_params": mlp.net.count_params(),
         "mlp_inference_us": {
             "mean": _r2(np.mean(mlp_us)),
             "std":  _r2(np.std(mlp_us)),
         },
+        # Retrieval + fusion latency per query (excludes the batched embedding API call).
+        "retrieval_latency_ms": {
+            "p50": _r2(p50),
+            "p95": _r2(p95),
+            "mean": _r2(np.mean(e2e_arr)) if len(e2e_arr) else 0.0,
+        },
+        "throughput_qps": _r2(1000.0 / np.mean(e2e_arr)) if len(e2e_arr) and np.mean(e2e_arr) > 0 else 0.0,
     }
 
     # ── 4. Weight analysis (3-way) ────────────────────────────────────────────
@@ -360,6 +424,11 @@ def print_results(results: dict) -> None:
     print(f"  MLP parameters:        {e['mlp_params']:,}")
     lat = e["mlp_inference_us"]
     print(f"  MLP inference latency: {lat['mean']:.1f} ± {lat['std']:.1f} μs")
+    if "retrieval_latency_ms" in e:
+        rl = e["retrieval_latency_ms"]
+        print(f"  Retrieval+fusion lat.: p50={rl['p50']:.2f} ms  p95={rl['p95']:.2f} ms  "
+              f"(mean={rl['mean']:.2f} ms, excl. embedding API)")
+        print(f"  Throughput:            {e['throughput_qps']:.1f} q/s")
     if "faiss_index_mb" in e:
         print(f"  FAISS index size:      {e['faiss_index_mb']:.1f} MB")
         print(f"  BM25 index size:       {e['bm25_pkl_mb']:.1f} MB")

@@ -51,6 +51,8 @@ from ragas.metrics.collections import (
 from tqdm import tqdm
 
 from rag_vie.config import settings
+from rag_vie.features.combined import combine
+from rag_vie.features.signal import extract_signal_features
 from rag_vie.features.vietnamese import extract_features
 from rag_vie.fusion.mlp import FusionMLP
 from rag_vie.generator.llm import generate
@@ -106,19 +108,6 @@ METHODS: dict[str, tuple[float, float, float] | None] = {
 }
 
 
-def retrieve_contexts(
-    hybrid: "HybridRetriever",
-    passages_map: dict[str, str],
-    query: str,
-    weights: tuple[float, ...],
-    top_k: int,
-) -> list[str]:
-    hits = hybrid.retrieve(query, weights, settings.top_k_dense, settings.top_k_bm25, top_k)
-    return [passages_map[pid] for pid, _, _ in hits if pid in passages_map]
-
-
-# ── Build samples for one method ──────────────────────────────────────────
-
 def build_samples(
     qas: list[dict],
     hybrid: "HybridRetriever",
@@ -127,6 +116,7 @@ def build_samples(
     method: str,
     fixed_w: tuple[float, ...] | None,
     top_k: int,
+    bm25_idf: dict[str, float],
 ) -> list[SingleTurnSample]:
     samples = []
     sample_ids: list[str] = []
@@ -136,12 +126,19 @@ def build_samples(
         if not ground_truth:
             continue
 
+        # Retrieve candidates first so the MLP can use signal-aware features.
+        candidates = hybrid.retrieve_candidates(query, settings.top_k_dense, settings.top_k_bm25)
         if fixed_w is not None:
             weights = fixed_w
         else:
-            weights = mlp.predict_weights(extract_features(query, bm25_vocab=bm25_vocab))
+            qf = extract_features(query, bm25_idf=bm25_idf)
+            sf = extract_signal_features(
+                candidates.dense_norm, candidates.bm25_norm, candidates.sparse_norm
+            )
+            weights = mlp.predict_weights(combine(qf, sf))
 
-        contexts = retrieve_contexts(hybrid, passages_map, query, weights, top_k)
+        hits = hybrid.fuse(candidates, weights, top_k)
+        contexts = [passages_map[pid] for pid, _, _ in hits if pid in passages_map]
         if not contexts:
             continue
 
