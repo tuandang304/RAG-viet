@@ -8,7 +8,6 @@ class Settings(BaseSettings):
     fpt_api_key: str
     fpt_base_url: str
     fpt_embedding_model: str = "vietnamese-embedding"
-    fpt_sparse_model: str = "vietnamese-embedding"   # thường cùng model với dense
     fpt_llm_model: str = "Qwen3-32B"
 
     # Retrieval

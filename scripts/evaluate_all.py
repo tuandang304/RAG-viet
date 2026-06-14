@@ -45,6 +45,15 @@ from rag_vie.features.vietnamese import FEATURE_NAMES, extract_features
 from rag_vie.fusion.mlp import FusionMLP
 from rag_vie.retrieval.bm25 import BM25Retriever
 from rag_vie.retrieval.embedder import embed_query
+from rag_vie.utils.fusion import fuse_scores
+from rag_vie.utils.metrics import (
+    hit_at_1,
+    map_at_k,
+    min_max_normalize as _minmax,
+    mrr_at_k,
+    ndcg_at_k,
+    recall_at_k,
+)
 
 # NOTE: DenseRetriever (which transitively imports faiss) is intentionally NOT
 # imported at runtime here. faiss's MKL/OpenMP runtime collides with the
@@ -92,48 +101,7 @@ def _r4(x) -> float: return round(float(x), 4)
 def _r2(x) -> float: return round(float(x), 2)
 
 
-# ── Retrieval metrics ─────────────────────────────────────────────────────────
-
-def ndcg_at_k(ranked: list[str], relevant: set[str], k: int) -> float:
-    dcg  = sum(1.0 / np.log2(i + 2) for i, p in enumerate(ranked[:k]) if p in relevant)
-    idcg = sum(1.0 / np.log2(i + 2) for i in range(min(len(relevant), k)))
-    return dcg / idcg if idcg > 0 else 0.0
-
-
-def mrr_at_k(ranked: list[str], relevant: set[str], k: int) -> float:
-    for i, p in enumerate(ranked[:k]):
-        if p in relevant:
-            return 1.0 / (i + 1)
-    return 0.0
-
-
-def map_at_k(ranked: list[str], relevant: set[str], k: int) -> float:
-    hits, s = 0, 0.0
-    for i, p in enumerate(ranked[:k]):
-        if p in relevant:
-            hits += 1
-            s += hits / (i + 1)
-    denom = min(len(relevant), k)
-    return s / denom if denom > 0 else 0.0
-
-
-def recall_at_k(ranked: list[str], relevant: set[str], k: int) -> float:
-    return sum(1 for p in ranked[:k] if p in relevant) / len(relevant) if relevant else 0.0
-
-
-def hit_at_1(ranked: list[str], relevant: set[str]) -> float:
-    return 1.0 if ranked and ranked[0] in relevant else 0.0
-
-
 # ── Score fusion ──────────────────────────────────────────────────────────────
-
-def _minmax(scores: dict[str, float]) -> dict[str, float]:
-    if not scores:
-        return scores
-    lo, hi = min(scores.values()), max(scores.values())
-    span = hi - lo
-    return {k: (v - lo) / span if span > 0 else 0.0 for k, v in scores.items()}
-
 
 def fuse(
     dense_norm:  dict[str, float],
@@ -142,12 +110,7 @@ def fuse(
     weights: tuple[float, float, float],
     k_final: int,
 ) -> list[str]:
-    a, b, c = weights
-    ids = set(dense_norm) | set(bm25_norm) | set(sparse_norm)
-    scored = {
-        p: a * dense_norm.get(p, 0.0) + b * bm25_norm.get(p, 0.0) + c * sparse_norm.get(p, 0.0)
-        for p in ids
-    }
+    scored = fuse_scores(dense_norm, bm25_norm, sparse_norm, weights)
     return [p for p, _ in sorted(scored.items(), key=lambda x: x[1], reverse=True)[:k_final]]
 
 
@@ -508,8 +471,10 @@ def main() -> None:
 
     # Index file sizes
     def _mb(path: str) -> float:
-        try:    return round(os.path.getsize(path) / 1e6, 2)
-        except: return -1.0
+        try:
+            return round(os.path.getsize(path) / 1e6, 2)
+        except OSError:
+            return -1.0
 
     results["efficiency"]["faiss_index_mb"] = _mb(str(Path(args.index_dir) / "index.faiss"))
     results["efficiency"]["bm25_pkl_mb"]    = _mb(str(Path(args.index_dir) / "bm25.pkl"))

@@ -1,6 +1,14 @@
 # Phần mở rộng: Dynamic Hybrid RAG cho tiếng Việt
 
-**Phiên bản:** 1.1
+> ⚠️ **TÀI LIỆU THIẾT KẾ CŨ (đã bị thay thế).** Đây là ghi chú định hướng ban đầu và
+> **không còn khớp với hệ thống đã triển khai**. Khác biệt chính so với code/paper hiện tại:
+> (1) tín hiệu thứ ba là **BGE-M3 learned-sparse (lexical weights)**, *không* phải
+> Multi-vector/ColBERT; (2) bộ dữ liệu thực nghiệm là **UIT-ViQuAD 2.0 + DANGDOCAO**,
+> *không* phải VIMQA/ViNewsQA; (3) fusion là **three-way `(a, b, c)`** với MLP Keras
+> 8-feature (~2,947 params), *không* phải two-way `(a, b)`.
+> Nguồn chuẩn (authoritative): [`docs/research_paper.md`](research_paper.md) và `CLAUDE.md`.
+
+**Phiên bản:** 1.1 (lưu trữ — superseded)
 **Ngày:** 08/05/2026
 
 ## Tóm tắt (Executive Summary)

@@ -1,7 +1,7 @@
 # CLAUDE.md — RAG_vie
 
 Nghiên cứu Dynamic Hybrid RAG cho tiếng Việt. Mục tiêu: publish Q3 journal.  
-Stack: Python 3.13 · uv · FPT AI Factory (embedding + LLM) · FAISS · BM25 · PyTorch MLP.
+Stack: Python 3.13 · uv · FPT AI Factory (embedding + LLM) · FAISS · BM25 · BGE-M3 (PyTorch) · Keras/TensorFlow MLP.
 
 ---
 
@@ -10,9 +10,9 @@ Stack: Python 3.13 · uv · FPT AI Factory (embedding + LLM) · FAISS · BM25 ·
 Luôn dùng `uv run` — không dùng `python` trực tiếp.
 
 ```bash
-uv run python scripts/build_index.py --data-path data/processed/passages.jsonl
-uv run python scripts/evaluate.py --qas-path data/processed/viaquad_dev.jsonl
-uv run python main.py --query "Thủ đô của Việt Nam là gì?"
+uv run python scripts/build_index.py --data-path data/processed/viaquad_passages.jsonl --index-dir indexes/viaquad
+uv run python scripts/evaluate_all.py --qas-path data/processed/viaquad_dev.jsonl --index-dir indexes/viaquad --mlp-path checkpoints/fusion_mlp_aug.keras
+uv run python main.py --index-dir indexes/viaquad --mlp-path checkpoints/fusion_mlp_aug.keras --query "Thủ đô của Việt Nam là gì?"
 uv run jupyter lab
 ```
 
@@ -45,7 +45,7 @@ Copy `.env.example` → `.env` và điền:
 ```
 Query
   │
-  ├─ extract_features(query) → 7 Vietnamese-aware features
+  ├─ extract_features(query) → 8 Vietnamese-aware features
   │       └─ MLP → softmax → (a, b, c) weights
   │
   ├─ embed_query(query) → FPT embedding API
@@ -72,7 +72,7 @@ Query
 - LLM generation: `POST {FPT_BASE_URL}/chat/completions`
 - Sparse: local inference only (BGE-M3 via FlagEmbedding, ~570 MB download on first run)
 
-**Fusion weights** `(a, b, c) = softmax(MLP(features))` — MLP nhỏ (~2,660 params), dự đoán động theo từng query.  
+**Fusion weights** `(a, b, c) = softmax(MLP(features))` — MLP nhỏ (~2,947 params, Keras/TensorFlow), dự đoán động theo từng query.  
 Khi MLP chưa train, weights ≈ `(0.33, 0.33, 0.33)`.
 
 ---
@@ -89,11 +89,15 @@ src/rag_vie/
 │   ├── sparse.py              # SparseRetriever (BGE-M3 lexical weights, inverted index)
 │   └── hybrid.py              # HybridRetriever: 3-way normalize + weighted sum
 ├── features/
-│   └── vietnamese.py          # 7 features: diacritic, compound, english, tech, clause, question_word, length
+│   └── vietnamese.py          # 8 features: diacritic, compound, english, tech, clause, question_word, length, oov
 ├── fusion/
-│   └── mlp.py                 # FusionMLP: Linear(7→64→32→3) + softmax → (a, b, c)
+│   └── mlp.py                 # FusionMLP (Keras): Dense(64)→LayerNorm→GELU→Dropout→Dense(32)→LayerNorm→GELU→Dropout→Dense(3,softmax)
 ├── generator/
 │   └── llm.py                 # generate() gọi Qwen3:32B qua FPT
+├── utils/
+│   ├── metrics.py            # ndcg/mrr/map/recall/hit_at_1 + min_max_normalize (dùng chung train + eval)
+│   ├── fusion.py             # fuse_scores: a·dense + b·bm25 + c·sparse
+│   └── text.py               # remove_diacritics (mô phỏng gõ thiếu dấu)
 └── pipeline.py                # RAGPipeline.run(query) → RAGResult
 ```
 
@@ -140,14 +144,14 @@ uv run python scripts/build_index.py \
 uv run python scripts/evaluate_all.py \
   --qas-path data/processed/viaquad_dev.jsonl \
   --index-dir indexes/viaquad \
-  --mlp-path checkpoints/fusion_mlp_3way.pt \
+  --mlp-path checkpoints/fusion_mlp_aug.keras \
   --output results/viaquad_dev.json
 
 # Cross-domain zero-shot (train ViQuAD → test DANGDOCAO)
 uv run python scripts/evaluate_all.py \
   --qas-path data/processed/dangdocao_test.jsonl \
   --index-dir indexes/dangdocao \
-  --mlp-path checkpoints/fusion_mlp_3way.pt \
+  --mlp-path checkpoints/fusion_mlp_aug.keras \
   --output results/dangdocao_test.json
 
 # Không có sparse index (2-way fallback)
@@ -166,7 +170,7 @@ Methods được evaluate: `mlp`, `fixed_equal` (1/3,1/3,1/3), `dense_bm25` (0.5
 `evaluate_all.py` trả về 4 nhóm metrics:
 1. **Retrieval quality**: NDCG@10, MRR@10, MAP@10, Recall@10, Recall@100, Hit@1
 2. **Statistical significance**: Paired t-test + Wilcoxon, 95% bootstrap CI (2000 resamples)
-3. **Efficiency**: Latency p50/p95, throughput (q/s)
+3. **Efficiency**: số param MLP, latency suy luận MLP (μs, mean/std), kích thước index (MB). *Chưa* đo latency p50/p95 end-to-end hay throughput — xem PLAN.md nếu cần bổ sung.
 4. **Weight interpretability**: Entropy H, Pearson correlations (diacritic↔w_dense, compound↔w_bm25, english↔w_sparse), stratified analysis (11 strata)
 
 Kết quả lưu vào `results/` dạng JSON khi truyền `--output`.
@@ -188,7 +192,11 @@ Baseline cần vượt (theo thứ tự khó tăng dần):
 - BM25 score không có upper bound → bắt buộc min-max normalize trước khi fuse với dense score.
 - underthesea `word_tokenize(text, format="text")` trả về string với từ ghép nối bằng `_` (ví dụ: `học_sinh`).
 - MLP `output_dim=3` cho three-way fusion `(a, b, c)` → `(w_dense, w_bm25, w_sparse)`.
+- **FusionMLP là Keras/TensorFlow** (không phải PyTorch), input 8 features. `FusionMLP.save()` ghi định dạng Keras → đặt đuôi `.keras`. `torch` vẫn cần cho BGE-M3.
+- Train MLP chạy phase thu thập dữ liệu (FAISS) rồi **spawn subprocess riêng** để fit Keras → tránh xung đột OMP giữa FAISS-MKL và TensorFlow/PyTorch.
+- Soft-label grid: `_N=20` trong `train_mlp.py` → simplex 3-way **231 điểm** (step 0.05); 2-way (c=0) là 21 điểm.
 - `retrieval/sparse.py` dùng BGE-M3 local (BAAI/bge-m3 qua FlagEmbedding) — **không** phải FPT API. Lần đầu chạy sẽ download ~570 MB.
-- OMP deadlock trên macOS (FAISS + PyTorch): luôn set `KMP_DUPLICATE_LIB_OK=TRUE` và khởi tạo PyTorch (BGE-M3) **trước** FAISS.
+- OMP deadlock (FAISS + PyTorch/TF) trên **macOS và Windows** (Windows biểu hiện là exit `0xC0000005`): luôn set `KMP_DUPLICATE_LIB_OK=TRUE`, import `pyarrow` sớm, và khởi tạo PyTorch (BGE-M3) **trước** FAISS.
+- Metric + min-max normalize + fuse dùng chung từ `rag_vie.utils.metrics` và `rag_vie.utils.fusion` — **không** copy lại trong scripts (đảm bảo train và eval tính giống hệt nhau).
 - Scores từ dense, BM25, và sparse đều được min-max normalize trước khi fuse — quan trọng vì BM25/sparse không có upper bound.
-- Train MLP mới: `uv run python scripts/train_mlp.py --output checkpoints/fusion_mlp_3way.pt --emb-cache checkpoints/train_embeddings.npy`
+- Train MLP mới: `uv run python scripts/train_mlp.py --output checkpoints/fusion_mlp_aug.keras --emb-cache checkpoints/train_aug_embeddings.npy`

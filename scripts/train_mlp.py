@@ -117,21 +117,7 @@ from rag_vie.features.vietnamese import extract_features  # noqa: E402
 from rag_vie.retrieval.bm25 import BM25Retriever          # noqa: E402
 from rag_vie.retrieval.dense import DenseRetriever         # noqa: E402
 from rag_vie.retrieval.embedder import embed_texts         # noqa: E402
-
-
-def _minmax(scores: dict[str, float]) -> dict[str, float]:
-    if not scores:
-        return {}
-    lo, hi = min(scores.values()), max(scores.values())
-    if hi == lo:
-        return {k: 0.0 for k in scores}
-    return {k: (v - lo) / (hi - lo) for k, v in scores.items()}
-
-
-def ndcg_at_k(ranked: list[str], relevant: set[str], k: int) -> float:
-    dcg  = sum(1.0 / np.log2(i + 2) for i, p in enumerate(ranked[:k]) if p in relevant)
-    idcg = sum(1.0 / np.log2(i + 2) for i in range(min(len(relevant), k)))
-    return dcg / idcg if idcg > 0 else 0.0
+from rag_vie.utils.metrics import min_max_normalize as _minmax, ndcg_at_k  # noqa: E402
 
 
 def find_soft_weights(

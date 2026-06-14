@@ -1,6 +1,6 @@
 # Dynamic Hybrid RAG for Vietnamese
 
-Adaptive retrieval-augmented generation for Vietnamese that replaces fixed fusion weights with a per-query MLP (~2,660 params). The MLP predicts `(w_dense, w_bm25, w_sparse)` from seven Vietnamese-aware linguistic features, enabling dynamic three-way fusion across dense (FPT), BM25, and BGE-M3 sparse signals.
+Adaptive retrieval-augmented generation for Vietnamese that replaces fixed fusion weights with a per-query MLP (~2,947 params, Keras/TensorFlow). The MLP predicts `(w_dense, w_bm25, w_sparse)` from eight Vietnamese-aware linguistic features, enabling dynamic three-way fusion across dense (FPT), BM25, and BGE-M3 sparse signals.
 
 ---
 
@@ -154,7 +154,7 @@ Trains the dynamic fusion MLP on ViQuAD training queries using soft-label superv
 uv run python scripts/train_mlp.py \
     --qas-path data/processed/viaquad_train_aug.jsonl \
     --index-dir indexes/viaquad \
-    --output checkpoints/fusion_mlp_aug.pt \
+    --output checkpoints/fusion_mlp_aug.keras \
     --emb-cache checkpoints/train_aug_embeddings.npy
 ```
 
@@ -173,12 +173,12 @@ Fine-tuning from an existing checkpoint:
 
 ```bash
 uv run python scripts/train_mlp.py \
-    --init-from checkpoints/fusion_mlp_aug.pt \
+    --init-from checkpoints/fusion_mlp_aug.keras \
     --emb-cache checkpoints/train_aug_embeddings.npy \
     --lr 1e-4 --epochs 50
 ```
 
-> **macOS / ARM64:** Training is automatically spawned in a subprocess to avoid an OMP deadlock between FAISS and PyTorch. This is handled internally — no action needed.
+> **OMP note (macOS & Windows):** The Keras/TensorFlow training step is automatically spawned in a fresh subprocess to avoid an OpenMP/MKL runtime clash between FAISS and TensorFlow/PyTorch (on Windows this otherwise manifests as exit `0xC0000005`). This is handled internally — no action needed.
 
 ---
 
@@ -191,28 +191,28 @@ Run the unified evaluation script to compute all four metric groups:
 uv run python scripts/evaluate_all.py \
     --qas-path data/processed/viaquad_dev.jsonl \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_aug.keras \
     --output results/eval_all_dev.json
 
 # In-domain: ViQuAD test set (held-out)
 uv run python scripts/evaluate_all.py \
     --qas-path data/processed/viaquad_test.jsonl \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_aug.keras \
     --output results/eval_all_test.json
 
 # Diacritic robustness (dev queries with all tone marks removed)
 uv run python scripts/evaluate_all.py \
     --qas-path data/processed/viaquad_dev_noisy.jsonl \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_aug.keras \
     --output results/eval_all_dev_noisy.json
 
 # Cross-domain zero-shot: MLP trained on ViQuAD, tested on DANGDOCAO
 uv run python scripts/evaluate_all.py \
     --qas-path data/processed/dangdocao_test.jsonl \
     --index-dir indexes/dangdocao \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_aug.keras \
     --output results/eval_all_cross.json
 ```
 
@@ -222,11 +222,11 @@ The script evaluates six methods simultaneously — `mlp`, `fixed_equal` (1/3,1/
 |---|---|
 | **Retrieval** | NDCG@10, MRR@10, MAP@10, Recall@10, Recall@100, Hit@1 per method |
 | **Significance** | Paired t-test p, Wilcoxon p, 95% bootstrap CI for MLP vs each baseline |
-| **Efficiency** | MLP param count, index sizes (MB), latency p50/p95, throughput (q/s) |
+| **Efficiency** | MLP param count, MLP inference latency (μs, mean/std), index sizes (MB) |
 | **Weight analysis** | Entropy H, weight distributions, Pearson correlations (diacritic↔w_dense, compound↔w_bm25, english↔w_sparse) |
 | **Stratified** | NDCG@10 and mean weights per query-feature stratum (11 strata: diac_low/mid/high, comp, eng, length, clause) |
 
-Each query calls the FPT embedding API exactly once; all four methods share the same dense/BM25 hits.
+Each query calls the FPT embedding API exactly once; all six methods share the same dense/BM25/sparse hits.
 
 ---
 
@@ -239,7 +239,7 @@ Evaluates full RAG quality using RAGAS metrics with Qwen3-32B as judge. **Makes 
 uv run python scripts/evaluate_ragas.py \
     --qas-path data/processed/viaquad_dev.jsonl \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_aug.keras \
     --n-samples 50 \
     --output results/ragas_clean.json
 
@@ -247,7 +247,7 @@ uv run python scripts/evaluate_ragas.py \
 uv run python scripts/evaluate_ragas.py \
     --qas-path data/processed/viaquad_dev_noisy.jsonl \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_aug.keras \
     --n-samples 50 \
     --output results/ragas_noisy.json
 ```
@@ -261,13 +261,13 @@ RAGAS metrics (judged by Qwen3-32B): Context Precision, Context Recall, Faithful
 ```bash
 uv run python main.py \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_aug.keras \
     --query "Thủ đô của Việt Nam là gì?"
 
 # Skip LLM generation, return retrieved passages only
 uv run python main.py \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_aug.keras \
     --query "Thủ đô của Việt Nam là gì?" \
     --no-generate
 ```
@@ -288,13 +288,15 @@ RAG_vie/
 │   │   ├── sparse.py           # SparseRetriever — BGE-M3 local, inverted index
 │   │   └── hybrid.py           # HybridRetriever — 3-way min-max normalize + weighted sum
 │   ├── features/
-│   │   └── vietnamese.py       # 7 Vietnamese-aware query features
+│   │   └── vietnamese.py       # 8 Vietnamese-aware query features (incl. oov_ratio)
 │   ├── fusion/
-│   │   └── mlp.py              # FusionMLP — Linear(7→64→32→3) + softmax → (w_dense, w_bm25, w_sparse)
+│   │   └── mlp.py              # FusionMLP (Keras) — Dense+LayerNorm+GELU ×2 → softmax → (w_dense, w_bm25, w_sparse)
 │   ├── generator/
 │   │   └── llm.py              # Qwen3-32B via FPT chat/completions
 │   └── utils/
-│       └── text.py             # Text normalization helpers
+│       ├── metrics.py          # ndcg/mrr/map/recall/hit_at_1 + min_max_normalize (shared by train + eval)
+│       ├── fusion.py           # fuse_scores — a·dense + b·bm25 + c·sparse
+│       └── text.py             # Text normalization helpers (remove_diacritics)
 │
 ├── scripts/
 │   ├── download_data.py        # Step 1 — HuggingFace → JSONL
@@ -306,7 +308,7 @@ RAG_vie/
 │
 ├── data/processed/             # JSONL datasets (gitignored, generated by download_data.py)
 ├── indexes/                    # FAISS + BM25 indexes (gitignored, generated by build_index.py)
-├── checkpoints/                # MLP .pt files and embedding caches (gitignored)
+├── checkpoints/                # MLP .keras files and embedding caches (gitignored)
 ├── results/                    # Evaluation JSON outputs
 ├── docs/
 │   └── research_paper.md       # Paper draft (target: Q3 2026 journal)
