@@ -1,7 +1,7 @@
 # CLAUDE.md — RAG_vie
 
 Nghiên cứu Dynamic Hybrid RAG cho tiếng Việt. Mục tiêu: publish Q3 journal.  
-Stack: Python 3.13 · uv · FPT AI Factory (embedding + LLM) · FAISS · BM25 · PyTorch MLP.
+Stack: Python 3.13 · uv · FPT AI Factory (embedding + LLM) · FAISS · BM25 · Keras/TensorFlow MLP · PyTorch (BGE-M3, PhoBERT).
 
 ---
 
@@ -11,8 +11,11 @@ Luôn dùng `uv run` — không dùng `python` trực tiếp.
 
 ```bash
 uv run python scripts/build_index.py --data-path data/processed/passages.jsonl
-uv run python scripts/evaluate.py --qas-path data/processed/viaquad_dev.jsonl
+uv run python scripts/evaluate_all.py --qas-path data/processed/viaquad_dev.jsonl --index-dir indexes/viaquad
 uv run python main.py --query "Thủ đô của Việt Nam là gì?"
+uv run pytest -m "not slow"        # unit tests nhanh
+uv run pytest                      # full suite (load TensorFlow)
+uv run ruff check src tests scripts experiments
 uv run jupyter lab
 ```
 
@@ -45,20 +48,27 @@ Copy `.env.example` → `.env` và điền:
 ```
 Query
   │
-  ├─ extract_features(query) → 7 Vietnamese-aware features
-  │       └─ MLP → softmax → (a, b, c) weights
+  ├─ extract_features(query) → 8 Vietnamese-aware features
+  │       └─ MLP (Grid NDCG Predictor) → argmax 66 simplex points → (a, b, c) weights
   │
   ├─ embed_query(query) → FPT embedding API
   │       └─ FAISS search → top-100 dense hits           (s_dense)
   │
   ├─ underthesea tokenize → BM25 search → top-100 hits   (s_bm25)
   │
-  └─ BGE-M3 sparse encode → inverted index → top-100 hits (s_sparse)
+  ├─ BGE-M3 sparse encode → inverted index → top-100 hits (s_sparse)
+  │
+  └─ bỏ dấu + syllable tokenize → toneless BM25 → top-100 (s_toneless)
           │
           └─ min-max normalize mỗi nguồn
-                  └─ fused score = a·s_dense + b·s_bm25 + c·s_sparse
+                  └─ fused score = a·s_dense + b·s_bm25 + c·s_sparse + d·s_toneless
                           └─ top-10 → Qwen3:32B generator → answer
 ```
+
+**Kênh toneless** (`bm25_toneless.pkl`): BM25 trên corpus đã bỏ dấu, token cấp âm tiết
+(`BM25Retriever(tokenizer="toneless_syllable")`). Chuyên trị query mất dấu — router
+học gating hai chiều qua `diacritic_ratio` + retrieval signals. Khi index dir không có
+`bm25_toneless.pkl`, mọi script tự fallback 3-way.
 
 **Ba tín hiệu retrieval:**
 | Signal | Nguồn | Đặc điểm |
@@ -72,29 +82,44 @@ Query
 - LLM generation: `POST {FPT_BASE_URL}/chat/completions`
 - Sparse: local inference only (BGE-M3 via FlagEmbedding, ~570 MB download on first run)
 
-**Fusion weights** `(a, b, c) = softmax(MLP(features))` — MLP nhỏ (~2,660 params), dự đoán động theo từng query.  
-Khi MLP chưa train, weights ≈ `(0.33, 0.33, 0.33)`.
+**Fusion weights**: FusionMLP (Keras) là **Grid NDCG Predictor** — nhận 8 features, regress NDCG@10 cho 66 điểm trên simplex (bước 0.1), chọn điểm argmax → `(a, b, c)`. Checkpoint lưu dạng `.keras` (Normalization statistics nằm trong checkpoint, không cần scaler ngoài).
 
 ---
 
 ## Cấu trúc source
 
 ```
-src/rag_vie/
+src/rag_vie/                   # Package chính (installable) — mọi library code ở đây
 ├── config.py                  # pydantic-settings, đọc từ .env
 ├── retrieval/
 │   ├── embedder.py            # gọi FPT embedding API (batch=32)
-│   ├── bm25.py                # BM25Okapi + underthesea tokenizer
+│   ├── bm25.py                # BM25Okapi + underthesea tokenizer (public .vocab property)
 │   ├── dense.py               # DenseRetriever (FAISS IndexFlatIP, L2-norm)
 │   ├── sparse.py              # SparseRetriever (BGE-M3 lexical weights, inverted index)
 │   └── hybrid.py              # HybridRetriever: 3-way normalize + weighted sum
 ├── features/
-│   └── vietnamese.py          # 7 features: diacritic, compound, english, tech, clause, question_word, length
+│   ├── vietnamese.py          # 8 features: diacritic, compound, english, tech, clause, question_word, length, oov
+│   └── neural.py              # NeuralFeatureExtractor: frozen PhoBERT + projection head
 ├── fusion/
-│   └── mlp.py                 # FusionMLP: Linear(7→64→32→3) + softmax → (a, b, c)
+│   └── mlp.py                 # FusionMLP (Keras): Grid NDCG Predictor — 66-dim sigmoid, argmax → (a, b, c)
 ├── generator/
 │   └── llm.py                 # generate() gọi Qwen3:32B qua FPT
+├── datagen/                   # Sinh nhiễu LLM (Ollama Qwen3-14B + FPT validation)
+│   ├── prompts.py             # 4 loại nhiễu: missing_tone, typo_telex, informal, code_switch
+│   ├── generate_noise.py      # python -m rag_vie.datagen.generate_noise
+│   ├── validate.py            # validate semantic similarity ≥ threshold
+│   └── run_all.py             # python -m rag_vie.datagen.run_all
+├── utils/
+│   └── text.py                # remove_diacritics, ...
 └── pipeline.py                # RAGPipeline.run(query) → RAGResult
+
+Thư mục khác:
+├── scripts/                   # Các bước pipeline: download → augment → build_index → train → evaluate
+├── experiments/               # Runner cho thí nghiệm paper (gọi scripts/ với config cố định)
+├── tests/                     # pytest unit tests (uv run pytest; mark `slow` = load TensorFlow)
+├── data/{processed,generated,derived}/   # datasets JSONL (gitignored trừ derived)
+├── indexes/ · checkpoints/ · results/    # artefacts (gitignored)
+└── docs/{proposal,planning}/  # paper draft, proposal, kế hoạch
 ```
 
 ---
@@ -140,14 +165,14 @@ uv run python scripts/build_index.py \
 uv run python scripts/evaluate_all.py \
   --qas-path data/processed/viaquad_dev.jsonl \
   --index-dir indexes/viaquad \
-  --mlp-path checkpoints/fusion_mlp_3way.pt \
+  --mlp-path checkpoints/fusion_mlp_3way.keras \
   --output results/viaquad_dev.json
 
 # Cross-domain zero-shot (train ViQuAD → test DANGDOCAO)
 uv run python scripts/evaluate_all.py \
   --qas-path data/processed/dangdocao_test.jsonl \
   --index-dir indexes/dangdocao \
-  --mlp-path checkpoints/fusion_mlp_3way.pt \
+  --mlp-path checkpoints/fusion_mlp_3way.keras \
   --output results/dangdocao_test.json
 
 # Không có sparse index (2-way fallback)
@@ -187,8 +212,12 @@ Baseline cần vượt (theo thứ tự khó tăng dần):
 - FAISS index dùng **Inner Product** sau khi L2-normalize → tương đương cosine similarity.
 - BM25 score không có upper bound → bắt buộc min-max normalize trước khi fuse với dense score.
 - underthesea `word_tokenize(text, format="text")` trả về string với từ ghép nối bằng `_` (ví dụ: `học_sinh`).
-- MLP `output_dim=3` cho three-way fusion `(a, b, c)` → `(w_dense, w_bm25, w_sparse)`.
+- FusionMLP: `output_dim=286` (grid 4-way + toneless), `output_dim=66` (grid 3-way), `output_dim=11` (grid 2-way), `output_dim=3` (legacy direct weights). Checkpoint là file `.keras`; `input_dim` cho biết feature set (8 = linguistic, 26 = +signals 3-way, 36 = +signals 4-way) — pipeline/eval tự thích ứng.
+- Inference dùng `predict_weights(mode="expected")` (mặc định) — softmax-expected trên grid; `mode="argmax"` chỉ dành cho ablation.
+- Train router: luôn dùng `--raw-labels` (nhãn NDCG thô — min-max per-query khuếch đại nhiễu, đã gây regression). Tập train cần phủ regime mất dấu hoàn toàn (xem `data/processed/multidomain_train_toneless_aug.jsonl`).
 - `retrieval/sparse.py` dùng BGE-M3 local (BAAI/bge-m3 qua FlagEmbedding) — **không** phải FPT API. Lần đầu chạy sẽ download ~570 MB.
 - OMP deadlock trên macOS (FAISS + PyTorch): luôn set `KMP_DUPLICATE_LIB_OK=TRUE` và khởi tạo PyTorch (BGE-M3) **trước** FAISS.
+- Windows: import `pyarrow` **trước** torch/faiss trong scripts (tránh access violation 0xC0000005) — vì vậy scripts được phép vi phạm E402 (đã ignore trong ruff config).
 - Scores từ dense, BM25, và sparse đều được min-max normalize trước khi fuse — quan trọng vì BM25/sparse không có upper bound.
-- Train MLP mới: `uv run python scripts/train_mlp.py --output checkpoints/fusion_mlp_3way.pt --emb-cache checkpoints/train_embeddings.npy`
+- Train MLP mới: `uv run python scripts/train_mlp.py --output checkpoints/fusion_mlp_3way.keras --emb-cache checkpoints/train_embeddings.npy`
+- Trước khi commit: `uv run pytest -m "not slow"` và `uv run ruff check src tests scripts experiments` phải xanh.

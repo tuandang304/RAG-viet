@@ -65,7 +65,7 @@ class SparseRetriever:
         from tqdm import tqdm
 
         self._inverted_index = {}
-        self._passage_map = dict(zip(ids, passages))
+        self._passage_map = dict(zip(ids, passages, strict=True))
 
         bs = batch_size or _DEFAULT_BATCH
         # Encode in larger chunks of `bs * 8` and let FlagEmbedding sub-batch internally.
@@ -74,7 +74,7 @@ class SparseRetriever:
             batch = passages[i : i + chunk]
             batch_ids = ids[i : i + chunk]
             vecs = _encode_sparse(batch, batch_size=bs)
-            for doc_id, vec in zip(batch_ids, vecs):
+            for doc_id, vec in zip(batch_ids, vecs, strict=True):
                 for token, weight in vec.items():
                     if weight > 0:
                         self._inverted_index.setdefault(token, []).append(

@@ -38,8 +38,8 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-from openai import AsyncOpenAI, OpenAI
-from ragas import SingleTurnSample, evaluate
+from openai import AsyncOpenAI
+from ragas import SingleTurnSample
 from ragas.embeddings.base import embedding_factory
 from ragas.llms import llm_factory
 from ragas.metrics.collections import (
@@ -264,7 +264,7 @@ def main() -> None:
 
     # Load QAs
     with open(args.qas_path, encoding="utf-8") as f:
-        qas = [json.loads(l) for l in f if l.strip()]
+        qas = [json.loads(line) for line in f if line.strip()]
     qas = [q for q in qas if q.get("answers") and q["answers"][0]]
 
     # Apply exclusion BEFORE sampling so the resampled set is disjoint from prior runs.

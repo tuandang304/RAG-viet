@@ -42,7 +42,31 @@ dev = [
     "jupyter>=1.1.0",
     "matplotlib>=3.10.0",
     "seaborn>=0.13.0",
+    "pytest>=8.3.0",
+    "ruff>=0.8.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "slow: tests that load heavy ML frameworks (TensorFlow/Keras, BGE-M3) — deselect with -m 'not slow'",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "scripts", "experiments", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts set env vars / import pyarrow BEFORE other imports on purpose
+# (OMP deadlock + pyarrow DLL workarounds) — E402 is expected there.
+"scripts/*" = ["E402"]
+"experiments/*" = ["E402"]
 
 # Force the CUDA build of PyTorch so BGE-M3 sparse encoding (and any future
 # GPU-accelerated stages) can run on the local NVIDIA GPU. The default PyPI

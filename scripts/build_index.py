@@ -24,12 +24,17 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 import pyarrow  # noqa: F401
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# Windows consoles default to cp1252, which can't encode '→' in progress
+# messages — reconfigure instead of crashing after work is done.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import numpy as np
 from tqdm import tqdm
 
-from rag_vie.config import settings
 from rag_vie.retrieval.bm25 import BM25Retriever
 from rag_vie.retrieval.dense import DenseRetriever
 from rag_vie.retrieval.embedder import embed_texts
@@ -75,27 +80,43 @@ def main() -> None:
             sparse.save(sparse_path)
             print(f"  Sparse index → {sparse_path}")
 
-    # ── 2. Dense embeddings via FPT API
-    print("Embedding passages via FPT API ...")
-    all_embeddings = []
-    for i in tqdm(range(0, len(passages), args.batch_size), desc="  Embedding"):
-        batch = passages[i : i + args.batch_size]
-        all_embeddings.append(embed_texts(batch))
-    embeddings = np.vstack(all_embeddings)
+    # ── 2+3. Dense embeddings (FPT API) + FAISS index
+    # Skipped when index.faiss already exists — re-embedding costs real API money.
+    if (index_dir / "index.faiss").exists():
+        print(f"Dense index already exists at {index_dir / 'index.faiss'}, skipping.")
+    else:
+        print("Embedding passages via FPT API ...")
+        all_embeddings = []
+        for i in tqdm(range(0, len(passages), args.batch_size), desc="  Embedding"):
+            batch = passages[i : i + args.batch_size]
+            all_embeddings.append(embed_texts(batch))
+        embeddings = np.vstack(all_embeddings)
 
-    # ── 3. FAISS index
-    print("Building dense index ...")
-    dense = DenseRetriever()
-    dense.add(embeddings, passages, ids)
-    dense.save(index_dir)
-    print(f"  Dense index → {index_dir}")
+        print("Building dense index ...")
+        dense = DenseRetriever()
+        dense.add(embeddings, passages, ids)
+        dense.save(index_dir)
+        print(f"  Dense index → {index_dir}")
 
-    # ── 4. BM25 index
-    print("Building BM25 index ...")
-    bm25 = BM25Retriever()
-    bm25.build(passages, ids)
-    bm25.save(index_dir / "bm25.pkl")
-    print(f"  BM25 index → {index_dir / 'bm25.pkl'}")
+    # ── 4. BM25 index (underthesea word segmentation, diacritics kept)
+    if (index_dir / "bm25.pkl").exists():
+        print(f"BM25 index already exists at {index_dir / 'bm25.pkl'}, skipping.")
+    else:
+        print("Building BM25 index ...")
+        bm25 = BM25Retriever()
+        bm25.build(passages, ids)
+        bm25.save(index_dir / "bm25.pkl")
+        print(f"  BM25 index → {index_dir / 'bm25.pkl'}")
+
+    # ── 5. Toneless BM25 index (diacritic-stripped syllables — tone-robust channel)
+    if (index_dir / "bm25_toneless.pkl").exists():
+        print(f"Toneless BM25 index already exists at {index_dir / 'bm25_toneless.pkl'}, skipping.")
+    else:
+        print("Building toneless BM25 index ...")
+        toneless = BM25Retriever(tokenizer="toneless_syllable")
+        toneless.build(passages, ids)
+        toneless.save(index_dir / "bm25_toneless.pkl")
+        print(f"  Toneless BM25 index → {index_dir / 'bm25_toneless.pkl'}")
 
     print("Done.")
 

@@ -1,6 +1,6 @@
 # Dynamic Hybrid RAG for Vietnamese
 
-Adaptive retrieval-augmented generation for Vietnamese that replaces fixed fusion weights with a per-query MLP (~2,660 params). The MLP predicts `(w_dense, w_bm25, w_sparse)` from seven Vietnamese-aware linguistic features, enabling dynamic three-way fusion across dense (FPT), BM25, and BGE-M3 sparse signals.
+Adaptive retrieval-augmented generation for Vietnamese that replaces fixed fusion weights with a lightweight per-query MLP. The MLP takes eight Vietnamese-aware linguistic features and regresses NDCG@10 for 66 points on the weight simplex (Grid NDCG Predictor); the argmax point gives `(w_dense, w_bm25, w_sparse)`, enabling dynamic three-way fusion across dense (FPT), BM25, and BGE-M3 sparse signals.
 
 ---
 
@@ -154,7 +154,7 @@ Trains the dynamic fusion MLP on ViQuAD training queries using soft-label superv
 uv run python scripts/train_mlp.py \
     --qas-path data/processed/viaquad_train_aug.jsonl \
     --index-dir indexes/viaquad \
-    --output checkpoints/fusion_mlp_aug.pt \
+    --output checkpoints/fusion_mlp_3way.keras \
     --emb-cache checkpoints/train_aug_embeddings.npy
 ```
 
@@ -173,7 +173,7 @@ Fine-tuning from an existing checkpoint:
 
 ```bash
 uv run python scripts/train_mlp.py \
-    --init-from checkpoints/fusion_mlp_aug.pt \
+    --init-from checkpoints/fusion_mlp_3way.keras \
     --emb-cache checkpoints/train_aug_embeddings.npy \
     --lr 1e-4 --epochs 50
 ```
@@ -191,28 +191,28 @@ Run the unified evaluation script to compute all four metric groups:
 uv run python scripts/evaluate_all.py \
     --qas-path data/processed/viaquad_dev.jsonl \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_3way.keras \
     --output results/eval_all_dev.json
 
 # In-domain: ViQuAD test set (held-out)
 uv run python scripts/evaluate_all.py \
     --qas-path data/processed/viaquad_test.jsonl \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_3way.keras \
     --output results/eval_all_test.json
 
 # Diacritic robustness (dev queries with all tone marks removed)
 uv run python scripts/evaluate_all.py \
     --qas-path data/processed/viaquad_dev_noisy.jsonl \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_3way.keras \
     --output results/eval_all_dev_noisy.json
 
 # Cross-domain zero-shot: MLP trained on ViQuAD, tested on DANGDOCAO
 uv run python scripts/evaluate_all.py \
     --qas-path data/processed/dangdocao_test.jsonl \
     --index-dir indexes/dangdocao \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_3way.keras \
     --output results/eval_all_cross.json
 ```
 
@@ -239,7 +239,7 @@ Evaluates full RAG quality using RAGAS metrics with Qwen3-32B as judge. **Makes 
 uv run python scripts/evaluate_ragas.py \
     --qas-path data/processed/viaquad_dev.jsonl \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_3way.keras \
     --n-samples 50 \
     --output results/ragas_clean.json
 
@@ -247,7 +247,7 @@ uv run python scripts/evaluate_ragas.py \
 uv run python scripts/evaluate_ragas.py \
     --qas-path data/processed/viaquad_dev_noisy.jsonl \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_3way.keras \
     --n-samples 50 \
     --output results/ragas_noisy.json
 ```
@@ -261,13 +261,13 @@ RAGAS metrics (judged by Qwen3-32B): Context Precision, Context Recall, Faithful
 ```bash
 uv run python main.py \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_3way.keras \
     --query "Thủ đô của Việt Nam là gì?"
 
 # Skip LLM generation, return retrieved passages only
 uv run python main.py \
     --index-dir indexes/viaquad \
-    --mlp-path checkpoints/fusion_mlp_aug.pt \
+    --mlp-path checkpoints/fusion_mlp_3way.keras \
     --query "Thủ đô của Việt Nam là gì?" \
     --no-generate
 ```
@@ -277,10 +277,10 @@ uv run python main.py \
 ## Project Structure
 
 ```
-RAG_vie/
-├── src/rag_vie/
+RAG-viet/
+├── src/rag_vie/                # Installable package — all library code lives here
 │   ├── config.py               # pydantic-settings — reads from .env
-│   ├── pipeline.py             # RAGPipeline: query → answer (end-to-end)
+│   ├── pipeline.py             # RAGPipeline: query → answer (end-to-end) + CLI entry
 │   ├── retrieval/
 │   │   ├── embedder.py         # FPT embedding API, batch size 32
 │   │   ├── dense.py            # DenseRetriever — FAISS IndexFlatIP, L2-norm
@@ -288,31 +288,47 @@ RAG_vie/
 │   │   ├── sparse.py           # SparseRetriever — BGE-M3 local, inverted index
 │   │   └── hybrid.py           # HybridRetriever — 3-way min-max normalize + weighted sum
 │   ├── features/
-│   │   └── vietnamese.py       # 7 Vietnamese-aware query features
+│   │   ├── vietnamese.py       # 8 Vietnamese-aware query features (heuristic)
+│   │   └── neural.py           # NeuralFeatureExtractor — frozen PhoBERT + projection head
 │   ├── fusion/
-│   │   └── mlp.py              # FusionMLP — Linear(7→64→32→3) + softmax → (w_dense, w_bm25, w_sparse)
+│   │   └── mlp.py              # FusionMLP (Keras) — Grid NDCG Predictor, 66-point simplex argmax
 │   ├── generator/
 │   │   └── llm.py              # Qwen3-32B via FPT chat/completions
+│   ├── datagen/                # LLM-based noise generation (Ollama + FPT validation)
+│   │   ├── prompts.py          # 4 noise types: missing_tone, typo_telex, informal, code_switch
+│   │   ├── generate_noise.py   # python -m rag_vie.datagen.generate_noise
+│   │   ├── validate.py         # Semantic-similarity validation of generated noise
+│   │   └── run_all.py          # python -m rag_vie.datagen.run_all
 │   └── utils/
 │       └── text.py             # Text normalization helpers
 │
-├── scripts/
+├── scripts/                    # Pipeline steps (run in order on a fresh machine)
 │   ├── download_data.py        # Step 1 — HuggingFace → JSONL
 │   ├── augment_data.py         # Step 2 — diacritic-removal augmentation
-│   ├── build_index.py          # Step 3 — FAISS + BM25 index builder
-│   ├── train_mlp.py            # Step 4 — soft-label MLP training
+│   ├── build_index.py          # Step 3 — FAISS + BM25 + sparse index builder
+│   ├── prepare_multidomain_dataset.py  # Step 3b — multi-domain MLP training set (TVPL + ViCoQA + noise)
+│   ├── train_mlp.py            # Step 4 — grid soft-label MLP training
+│   ├── train_feature_extractor.py      # Optional — distill heuristic features into PhoBERT head
 │   ├── evaluate_all.py         # Step 5 — unified evaluation (4 metric groups)
 │   └── evaluate_ragas.py       # Step 6 — end-to-end RAGAS evaluation
 │
-├── data/processed/             # JSONL datasets (gitignored, generated by download_data.py)
-├── indexes/                    # FAISS + BM25 indexes (gitignored, generated by build_index.py)
-├── checkpoints/                # MLP .pt files and embedding caches (gitignored)
-├── results/                    # Evaluation JSON outputs
+├── experiments/                # Paper experiment runners (wrap scripts/ with fixed configs)
+├── tests/                      # pytest unit tests — uv run pytest
+│
+├── data/
+│   ├── processed/              # JSONL datasets (gitignored, generated by download_data.py)
+│   └── generated/              # LLM-generated noisy benchmarks (gitignored)
+├── indexes/                    # FAISS + BM25 + sparse indexes (gitignored)
+├── checkpoints/                # MLP .keras checkpoints and embedding caches (gitignored)
+├── results/                    # Evaluation JSON outputs (gitignored)
+│
 ├── docs/
-│   └── research_paper.md       # Paper draft (target: Q3 2026 journal)
-├── main.py                     # Single-query CLI entry point
+│   ├── research_paper.md       # Paper draft (target: Q3 2026 journal)
+│   ├── proposal/               # Research proposal (md + tex)
+│   └── planning/               # Working plans and notes
+├── main.py                     # Single-query CLI entry point (= uv run rag-vie)
 ├── .env.example                # Environment variable template
-└── pyproject.toml
+└── pyproject.toml              # Deps + pytest/ruff config
 ```
 
 ---
@@ -347,7 +363,27 @@ Both datasets download automatically via HuggingFace `datasets` — no manual re
 
 ---
 
-## Adding Packages
+## Development
+
+### Run tests
+
+```bash
+uv run pytest                  # full suite (loads TensorFlow — ~2 min)
+uv run pytest -m "not slow"    # fast unit tests only (~1 min)
+```
+
+Tests live in `tests/` and cover the pure logic (feature extraction, fusion math, BM25, simplex grids) without calling the FPT API — they run fine without a real `.env`.
+
+### Lint
+
+```bash
+uv run ruff check src tests scripts experiments          # check
+uv run ruff check src tests scripts experiments --fix    # auto-fix
+```
+
+Both are configured in `pyproject.toml` (`[tool.pytest.ini_options]`, `[tool.ruff]`). Please keep both green before committing.
+
+### Adding packages
 
 ```bash
 uv add <package>          # production dependency

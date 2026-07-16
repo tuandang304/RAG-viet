@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 import re
-import unicodedata
+from typing import TYPE_CHECKING
 
 import numpy as np
 from underthesea import word_tokenize
+
+if TYPE_CHECKING:
+    from .neural import NeuralFeatureExtractor
 
 # Câu hỏi tiếng Việt
 _QUESTION_WORDS = {
@@ -35,12 +40,25 @@ def _has_diacritic(token: str) -> bool:
     return bool(_TONED_PATTERN.search(token))
 
 
-def extract_features(query: str, bm25_vocab: set[str] | None = None) -> np.ndarray:
+def extract_features(
+    query: str,
+    bm25_vocab: set[str] | None = None,
+    neural_extractor: NeuralFeatureExtractor | None = None,
+) -> np.ndarray:
     """Extract Vietnamese-aware features from a query string.
+
     Returns a 1-D float32 array of length len(FEATURE_NAMES).
-    bm25_vocab: set of tokens in the BM25 corpus vocabulary (from BM25Okapi.idf.keys()).
-                When provided, enables OOV ratio calculation; otherwise oov_ratio=0.0.
+
+    Args:
+        query:             Input query string.
+        bm25_vocab:        Set of tokens in BM25 corpus vocab. Enables oov_ratio
+                           calculation; ignored when neural_extractor is provided.
+        neural_extractor:  When supplied, delegates to NeuralFeatureExtractor.extract()
+                           instead of computing heuristic features. Falls back to
+                           heuristic if None (default, zero additional cost).
     """
+    if neural_extractor is not None:
+        return neural_extractor.extract(query)
     syllables = query.strip().split()
     total_syl = max(len(syllables), 1)
 

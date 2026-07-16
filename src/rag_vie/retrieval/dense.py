@@ -29,7 +29,7 @@ class DenseRetriever:
         scores, indices = self._index.search(emb, k)
         return [
             (self._ids[idx], self._passages[idx], float(s))
-            for idx, s in zip(indices[0], scores[0])
+            for idx, s in zip(indices[0], scores[0], strict=True)
             if idx != -1
         ]
 

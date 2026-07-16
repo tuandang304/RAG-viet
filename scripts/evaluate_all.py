@@ -33,6 +33,7 @@ import pyarrow  # noqa: F401
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -41,7 +42,13 @@ from scipy import stats as sp_stats
 from tqdm import tqdm
 
 from rag_vie.config import settings
+from rag_vie.features.retrieval_signals import (
+    SIGNAL_NAMES,
+    SIGNAL_NAMES_4WAY,
+    extract_retrieval_signals,
+)
 from rag_vie.features.vietnamese import FEATURE_NAMES, extract_features
+from rag_vie.features.neural import NeuralFeatureExtractor
 from rag_vie.fusion.mlp import FusionMLP
 from rag_vie.retrieval.bm25 import BM25Retriever
 from rag_vie.retrieval.embedder import embed_query
@@ -72,18 +79,26 @@ STRATA: list[dict] = [
     {"name": "complex",     "feature": "clause_count_norm", "lo": 0.01, "hi": 1.01},
 ]
 
-# Three-way methods: (w_dense, w_bm25, w_sparse)
-METHODS: dict[str, tuple[float, float, float] | None] = {
-    "mlp":          None,
-    "fixed_equal":  (1/3, 1/3, 1/3),
-    "dense_bm25":   (0.5, 0.5, 0.0),    # former 2-way hybrid (for backward comparison)
-    "dense":        (1.0, 0.0, 0.0),
-    "bm25":         (0.0, 1.0, 0.0),
-    "sparse":       (0.0, 0.0, 1.0),
-}
+# Fusion methods. Weights are (w_dense, w_bm25, w_sparse, w_toneless);
+# toneless-specific methods are added only when a toneless index is loaded.
+def build_methods(has_toneless: bool) -> dict[str, tuple[float, float, float, float] | None]:
+    methods: dict[str, tuple[float, float, float, float] | None] = {
+        "mlp":          None,
+        "fixed_equal":  (1/3, 1/3, 1/3, 0.0),
+        "dense_bm25":   (0.5, 0.5, 0.0, 0.0),   # former 2-way hybrid (for backward comparison)
+        "dense":        (1.0, 0.0, 0.0, 0.0),
+        "bm25":         (0.0, 1.0, 0.0, 0.0),
+        "sparse":       (0.0, 0.0, 1.0, 0.0),
+    }
+    if has_toneless:
+        methods["toneless"]      = (0.0, 0.0, 0.0, 1.0)
+        methods["fixed_equal_4"] = (0.25, 0.25, 0.25, 0.25)
+    return methods
+
 
 # Baselines to compare MLP against in significance tests
 _SIG_BASELINES = ("fixed_equal", "dense_bm25", "dense", "bm25", "sparse")
+_SIG_BASELINES_TONELESS = ("toneless", "fixed_equal_4")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -136,16 +151,23 @@ def _minmax(scores: dict[str, float]) -> dict[str, float]:
 
 
 def fuse(
-    dense_norm:  dict[str, float],
-    bm25_norm:   dict[str, float],
-    sparse_norm: dict[str, float],
-    weights: tuple[float, float, float],
+    dense_norm:    dict[str, float],
+    bm25_norm:     dict[str, float],
+    sparse_norm:   dict[str, float],
+    toneless_norm: dict[str, float],
+    weights: tuple[float, ...],
     k_final: int,
 ) -> list[str]:
-    a, b, c = weights
-    ids = set(dense_norm) | set(bm25_norm) | set(sparse_norm)
+    w = tuple(weights) + (0.0,) * (4 - len(weights))
+    a, b, c, d = w
+    ids = set(dense_norm) | set(bm25_norm) | set(sparse_norm) | set(toneless_norm)
     scored = {
-        p: a * dense_norm.get(p, 0.0) + b * bm25_norm.get(p, 0.0) + c * sparse_norm.get(p, 0.0)
+        p: (
+            a * dense_norm.get(p, 0.0)
+            + b * bm25_norm.get(p, 0.0)
+            + c * sparse_norm.get(p, 0.0)
+            + d * toneless_norm.get(p, 0.0)
+        )
         for p in ids
     }
     return [p for p, _ in sorted(scored.items(), key=lambda x: x[1], reverse=True)[:k_final]]
@@ -193,57 +215,94 @@ def run_eval(
     k_final:   int,
     sparse_r=None,   # SparseRetriever | None
     k_sparse:  int = 100,
+    neural_extractor: "NeuralFeatureExtractor | None" = None,
+    weight_mode: str = "expected",
+    weight_temperature: float = 0.05,
+    toneless_r: BM25Retriever | None = None,
+    k_toneless: int = 100,
 ) -> dict:
+    methods = build_methods(has_toneless=toneless_r is not None)
     per_query: dict[str, dict[str, list]] = {
         m: {mt: [] for mt in ("ndcg10", "mrr10", "map10", "rec10", "rec100", "hit1")}
-        for m in METHODS
+        for m in methods
     }
     feat_idx = {name: i for i, name in enumerate(FEATURE_NAMES)}
     feat_rows: list[np.ndarray] = []
-    bm25_vocab = set(bm25_r._bm25.idf.keys())
+    bm25_vocab = bm25_r.vocab
 
-    # Weight accumulators (MLP 3-way)
-    w_dense_list:  list[float] = []
-    w_bm25_list:   list[float] = []
-    w_sparse_list: list[float] = []
+    # Weight accumulators (MLP routing)
+    w_dense_list:    list[float] = []
+    w_bm25_list:     list[float] = []
+    w_sparse_list:   list[float] = []
+    w_toneless_list: list[float] = []
     entropies:     list[float] = []
     mlp_us:        list[float] = []
+
+    # Checkpoints trained with post-retrieval signals expect 8+18 (3-way) or
+    # 8+28 (4-way) inputs; legacy checkpoints expect the 8 linguistic features.
+    n_base = len(FEATURE_NAMES)
+    use_signals_4way = mlp.input_dim == n_base + len(SIGNAL_NAMES_4WAY)
+    use_signals = use_signals_4way or mlp.input_dim == n_base + len(SIGNAL_NAMES)
+    if use_signals:
+        kind = "4-way" if use_signals_4way else "3-way"
+        print(f"MLP input_dim={mlp.input_dim} → using {kind} retrieval-signal features", flush=True)
+    if use_signals_4way and toneless_r is None:
+        raise SystemExit(
+            "MLP checkpoint expects the toneless channel but bm25_toneless.pkl "
+            "was not loaded — build it with build_index.py or pass --no-toneless off."
+        )
 
     for qa in tqdm(qas, desc="Evaluating"):
         query    = qa["question"]
         relevant = set(qa["relevant_ids"])
 
-        features = extract_features(query, bm25_vocab=bm25_vocab)
-        feat_rows.append(features)
+        # Retrieve once per source, shared across all methods (and needed
+        # BEFORE routing when the MLP consumes post-retrieval signals)
+        qemb   = embed_query(query)
+        d_hits = dense.search(qemb, k_dense)
+        b_hits = bm25_r.search(query, k_bm25)
+        s_hits = sparse_r.search(query, k_sparse) if sparse_r is not None else []
+        t_hits = toneless_r.search(query, k_toneless) if toneless_r is not None else []
+
+        d_raw = {pid: s for pid, _, s in d_hits}
+        b_raw = {pid: s for pid, _, s in b_hits}
+        s_raw = {pid: s for pid, _, s in s_hits}
+        t_raw = {pid: s for pid, _, s in t_hits}
+
+        features = extract_features(query, bm25_vocab=bm25_vocab, neural_extractor=neural_extractor)
+        feat_rows.append(features)   # linguistic features only (strata/correlations)
+
+        mlp_input = features
+        if use_signals:
+            signals = extract_retrieval_signals(
+                d_raw, b_raw, s_raw,
+                toneless_scores=t_raw if use_signals_4way else None,
+            )
+            mlp_input = np.concatenate([features, signals])
 
         # MLP inference + timing
         t0    = time.perf_counter()
-        w_mlp = mlp.predict_weights(features)   # (w_dense, w_bm25, w_sparse)
+        w_mlp = mlp.predict_weights(
+            mlp_input, mode=weight_mode, temperature=weight_temperature
+        )   # (w_dense, w_bm25, w_sparse[, w_toneless])
         mlp_us.append((time.perf_counter() - t0) * 1e6)
 
         w_dense_list.append(float(w_mlp[0]))
         w_bm25_list.append(float(w_mlp[1]))
         w_sparse_list.append(float(w_mlp[2]) if len(w_mlp) > 2 else 0.0)
+        w_toneless_list.append(float(w_mlp[3]) if len(w_mlp) > 3 else 0.0)
 
         eps = 1e-9
         entropies.append(float(-sum(w * np.log(w + eps) for w in w_mlp)))
 
-        # Retrieve once per source, shared across all methods
-        qemb   = embed_query(query)
-        d_hits = dense.search(qemb, k_dense)
-        b_hits = bm25_r.search(query, k_bm25)
-        s_hits = sparse_r.search(query, k_sparse) if sparse_r is not None else []
+        d_norm = _minmax(d_raw)
+        b_norm = _minmax(b_raw)
+        s_norm = _minmax(s_raw)
+        t_norm = _minmax(t_raw)
 
-        d_norm = _minmax({pid: s for pid, _, s in d_hits})
-        b_norm = _minmax({pid: s for pid, _, s in b_hits})
-        s_norm = _minmax({pid: s for pid, _, s in s_hits})
-
-        for method, fixed_w in METHODS.items():
-            if fixed_w is None:
-                w = w_mlp if len(w_mlp) == 3 else (*w_mlp, 0.0)
-            else:
-                w = fixed_w
-            ranked = fuse(d_norm, b_norm, s_norm, w, k_final)
+        for method, fixed_w in methods.items():
+            w = w_mlp if fixed_w is None else fixed_w
+            ranked = fuse(d_norm, b_norm, s_norm, t_norm, w, k_final)
 
             acc = per_query[method]
             acc["ndcg10"].append(ndcg_at_k(ranked, relevant, 10))
@@ -257,6 +316,7 @@ def run_eval(
     w_d_arr = np.array(w_dense_list)
     w_b_arr = np.array(w_bm25_list)
     w_s_arr = np.array(w_sparse_list)
+    w_t_arr = np.array(w_toneless_list)
 
     # ── 1. Aggregate retrieval metrics ────────────────────────────────────────
     methods_out: dict = {}
@@ -275,10 +335,11 @@ def run_eval(
         }
 
     # ── 2. Statistical significance (MLP vs each baseline) ───────────────────
+    sig_baselines = _SIG_BASELINES + (_SIG_BASELINES_TONELESS if toneless_r is not None else ())
     mlp_ndcg = np.array(per_query["mlp"]["ndcg10"])
     significance = {
         f"mlp_vs_{b}": significance_tests(mlp_ndcg, np.array(per_query[b]["ndcg10"]))
-        for b in _SIG_BASELINES
+        for b in sig_baselines
     }
 
     # ── 3. Efficiency ─────────────────────────────────────────────────────────
@@ -299,6 +360,7 @@ def run_eval(
     r_comp, p_comp = sp_stats.pearsonr(features_arr[:, ci_i], w_b_arr)
     r_eng,  p_eng  = sp_stats.pearsonr(features_arr[:, en_i], w_s_arr)
 
+    n_channels = 4 if toneless_r is not None else 3
     weight_analysis = {
         "w_dense":  {"mean": _r4(w_d_arr.mean()), "std": _r4(w_d_arr.std()),
                      "min": _r4(w_d_arr.min()),    "max": _r4(w_d_arr.max())},
@@ -306,10 +368,12 @@ def run_eval(
                      "min": _r4(w_b_arr.min()),    "max": _r4(w_b_arr.max())},
         "w_sparse": {"mean": _r4(w_s_arr.mean()), "std": _r4(w_s_arr.std()),
                      "min": _r4(w_s_arr.min()),    "max": _r4(w_s_arr.max())},
+        "w_toneless": {"mean": _r4(w_t_arr.mean()), "std": _r4(w_t_arr.std()),
+                       "min": _r4(w_t_arr.min()),    "max": _r4(w_t_arr.max())},
         "entropy": {
             "mean": _r4(np.mean(entropies)),
             "std":  _r4(np.std(entropies)),
-            "max_possible": _r4(np.log(3)),    # ln(3) ≈ 1.099 for uniform 3-way
+            "max_possible": _r4(np.log(n_channels)),   # ln(n) for uniform n-way
         },
         "pearson_diacritic_vs_wdense":  {"r": _r4(r_diac), "p": float(p_diac)},
         "pearson_compound_vs_wbm25":    {"r": _r4(r_comp), "p": float(p_comp)},
@@ -328,9 +392,10 @@ def run_eval(
             continue
         m_s = [mlp_ndcg_l[i] for i in idxs]
         e_s = [eq_ndcg_l[i] for i in idxs]
-        wd  = [w_dense_list[i]  for i in idxs]
-        wb  = [w_bm25_list[i]   for i in idxs]
-        ws  = [w_sparse_list[i] for i in idxs]
+        wd  = [w_dense_list[i]    for i in idxs]
+        wb  = [w_bm25_list[i]     for i in idxs]
+        ws  = [w_sparse_list[i]   for i in idxs]
+        wt  = [w_toneless_list[i] for i in idxs]
         stratified[s["name"]] = {
             "n":             len(idxs),
             "mlp_ndcg":     _r4(np.mean(m_s)),
@@ -339,6 +404,7 @@ def run_eval(
             "mean_w_dense":  round(float(np.mean(wd)), 3),
             "mean_w_bm25":   round(float(np.mean(wb)), 3),
             "mean_w_sparse": round(float(np.mean(ws)), 3),
+            "mean_w_toneless": round(float(np.mean(wt)), 3),
         }
 
     return {
@@ -408,7 +474,9 @@ def print_results(results: dict) -> None:
     print(f"\n{'─' * W}")
     print("  Weight Analysis  (3-way MLP predictions)")
     print(f"{'─' * W}")
-    for key in ("w_dense", "w_bm25", "w_sparse"):
+    for key in ("w_dense", "w_bm25", "w_sparse", "w_toneless"):
+        if key not in w:
+            continue
         d = w[key]
         print(f"  {key:<10}  mean={d['mean']:.4f}  std={d['std']:.4f}  "
               f"[{d['min']:.4f}, {d['max']:.4f}]")
@@ -445,12 +513,20 @@ def print_results(results: dict) -> None:
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # Windows consoles default to cp1252, which cannot encode the box-drawing
+    # characters used by print_results — reconfigure instead of crashing.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="Unified evaluation — Dynamic Hybrid RAG (3-way)")
     parser.add_argument("--qas-path",    required=True,  help="QA JSONL file")
     parser.add_argument("--index-dir",   required=True,  help="Index directory")
     parser.add_argument("--mlp-path",    required=True,  help="FusionMLP checkpoint (.pt)")
     parser.add_argument("--sparse-path", default=None,   help="sparse.pkl path (default: <index-dir>/sparse.pkl)")
     parser.add_argument("--no-sparse",   action="store_true", help="Skip sparse signal")
+    parser.add_argument("--no-toneless", action="store_true",
+                        help="Skip the toneless BM25 channel even when "
+                             "<index-dir>/bm25_toneless.pkl exists.")
     parser.add_argument("--k-dense",     type=int, default=None)
     parser.add_argument("--k-bm25",      type=int, default=None)
     parser.add_argument("--k-sparse",    type=int, default=100)
@@ -460,6 +536,14 @@ def main() -> None:
                              "Use this instead of head -n N to avoid HF-grouped-by-article bias.")
     parser.add_argument("--subset-seed", type=int, default=42,
                         help="Seed for --max-samples subsetting (default: 42)")
+    parser.add_argument("--neural-extractor-path", default=None,
+                        help="Path to trained NeuralFeatureExtractor projection weights (.pt). "
+                             "When provided, replaces heuristic feature extraction.")
+    parser.add_argument("--weight-mode", choices=["expected", "argmax"], default="expected",
+                        help="How grid-predictor NDCG becomes weights: softmax-expected grid "
+                             "point (default; flat surface → ~equal weights) or argmax (legacy).")
+    parser.add_argument("--weight-temperature", type=float, default=0.05,
+                        help="Softmax temperature for --weight-mode expected (lower = sharper).")
     parser.add_argument("--output",      default=None, help="Save JSON to this path")
     args = parser.parse_args()
 
@@ -490,6 +574,20 @@ def main() -> None:
     bm25_r = BM25Retriever.load(str(Path(args.index_dir) / "bm25.pkl"))
     mlp    = FusionMLP.load(args.mlp_path)
 
+    toneless_r = None
+    if not args.no_toneless:
+        toneless_path = Path(args.index_dir) / "bm25_toneless.pkl"
+        if toneless_path.exists():
+            toneless_r = BM25Retriever.load(toneless_path)
+            print(f"Toneless BM25 index loaded from {toneless_path}", flush=True)
+        else:
+            print(f"NOTE: {toneless_path} not found — evaluating without the toneless channel.")
+
+    neural_extractor = None
+    if args.neural_extractor_path and Path(args.neural_extractor_path).exists():
+        neural_extractor = NeuralFeatureExtractor.load(args.neural_extractor_path)
+        print(f"Neural feature extractor loaded from {args.neural_extractor_path}", flush=True)
+
     with open(args.qas_path, encoding="utf-8") as f:
         qas = [json.loads(line) for line in f if line.strip()]
     print(f"Loaded {len(qas):,} queries from {args.qas_path}")
@@ -504,30 +602,43 @@ def main() -> None:
         qas, dense, bm25_r, mlp,
         k_dense, k_bm25, args.k_final,
         sparse_r=sparse_r, k_sparse=args.k_sparse,
+        neural_extractor=neural_extractor,
+        weight_mode=args.weight_mode,
+        weight_temperature=args.weight_temperature,
+        toneless_r=toneless_r,
     )
 
     # Index file sizes
     def _mb(path: str) -> float:
-        try:    return round(os.path.getsize(path) / 1e6, 2)
-        except: return -1.0
+        try:
+            return round(os.path.getsize(path) / 1e6, 2)
+        except OSError:
+            return -1.0
 
     results["efficiency"]["faiss_index_mb"] = _mb(str(Path(args.index_dir) / "index.faiss"))
     results["efficiency"]["bm25_pkl_mb"]    = _mb(str(Path(args.index_dir) / "bm25.pkl"))
     results["efficiency"]["sparse_pkl_mb"]  = _mb(str(Path(args.index_dir) / "sparse.pkl"))
+    results["efficiency"]["toneless_pkl_mb"] = _mb(str(Path(args.index_dir) / "bm25_toneless.pkl"))
     results["meta"] = {
-        "qas_path":  args.qas_path,
-        "index_dir": args.index_dir,
-        "mlp_path":  args.mlp_path,
-        "sparse":    sparse_r is not None,
+        "qas_path":              args.qas_path,
+        "index_dir":             args.index_dir,
+        "mlp_path":              args.mlp_path,
+        "sparse":                sparse_r is not None,
+        "neural_extractor_path": args.neural_extractor_path,
+        "weight_mode":           args.weight_mode,
+        "weight_temperature":    args.weight_temperature,
+        "retrieval_signals":     mlp.input_dim > len(FEATURE_NAMES),
+        "toneless":              toneless_r is not None,
     }
 
-    print_results(results)
-
+    # Save BEFORE printing so results survive any console/encoding hiccup.
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
         print(f"Saved -> {args.output}")
+
+    print_results(results)
 
 
 if __name__ == "__main__":

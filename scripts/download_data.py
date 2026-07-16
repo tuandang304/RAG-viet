@@ -22,8 +22,6 @@ Usage:
 import argparse
 import hashlib
 import json
-import re
-import sys
 from pathlib import Path
 
 from datasets import load_dataset

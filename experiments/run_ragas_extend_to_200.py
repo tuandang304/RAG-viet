@@ -63,7 +63,7 @@ def derive_existing_ids(qas_jsonl: Path, n: int, seed: int) -> list[str]:
     then `random.sample(qas, n)` after `random.seed(seed)`. We replicate it.
     """
     with open(qas_jsonl, encoding="utf-8") as f:
-        qas = [json.loads(l) for l in f if l.strip()]
+        qas = [json.loads(line) for line in f if line.strip()]
     qas = [q for q in qas if q.get("answers") and q["answers"][0]]
     random.seed(seed)
     sampled = random.sample(qas, n)
@@ -145,8 +145,10 @@ def extend_condition(qas_filename: str, prev_json: Path, label: str) -> None:
     # 3. Merge with previously saved 50-sample results.
     if not prev_json.exists():
         sys.exit(f"[FAIL] previous result file not found: {prev_json}")
-    with open(prev_json,  encoding="utf-8") as f: existing = json.load(f)
-    with open(extra_out, encoding="utf-8") as f: extra    = json.load(f)
+    with open(prev_json, encoding="utf-8") as f:
+        existing = json.load(f)
+    with open(extra_out, encoding="utf-8") as f:
+        extra = json.load(f)
 
     merged = merge_results(existing, extra, N_EXISTING, N_EXTRA)
     merged_out.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")

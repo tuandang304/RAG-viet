@@ -14,12 +14,21 @@ wheels/
 
 # Data & indexes (large files)
 data/raw/
+data/raw_new/
 data/processed/
+data/generated/
 indexes/
 checkpoints/
 results/
 *.faiss
 *.pkl
+
+# Scratch / exploratory work (not part of the project)
+scratch/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
 
 # Jupyter
 .ipynb_checkpoints/
