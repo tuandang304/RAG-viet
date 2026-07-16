@@ -300,6 +300,8 @@ RAG-viet/
 │   │   ├── validate.py         # Semantic-similarity validation of generated noise
 │   │   └── run_all.py          # python -m rag_vie.datagen.run_all
 │   └── utils/
+│       ├── metrics.py          # Shared ranking metrics + min-max normalization (train & eval)
+│       ├── fusion.py           # fuse_scores — weighted 4-way score fusion
 │       └── text.py             # Text normalization helpers
 │
 ├── scripts/                    # Pipeline steps (run in order on a fresh machine)

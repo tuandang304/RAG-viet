@@ -16,14 +16,14 @@ The implementation will be carried out through the following technical component
     *   *Dense Retrieval:* Using FPT Vietnamese Embedding (1024-dim) indexed with FAISS for semantic search.
     *   *BM25 Retrieval:* Using `underthesea` for Vietnamese word segmentation and `BM25Okapi` for lexical matching.
     *   *Learned Sparse Retrieval:* Using BGE-M3 lexical weights via an inverted index to capture learned term importance.
-*   **Feature Extraction:** A dedicated module to extract 7 lightweight linguistic features from the query: diacritic ratio, compound word ratio, English token ratio, tech-term ratio, clause count, question-word presence, and normalized query length.
-*   **Adaptive MLP Fusion:** A 3-layer feed-forward neural network (approx. 2,691 parameters) taking the 7 features as input and outputting a softmax distribution over the 3 retrieval signals (dense, BM25, sparse) to guarantee weights sum to 1.
-*   **Soft-Label Training Strategy:** To train the MLP without ground-truth weights, we will compute NDCG@10 across a 3D simplex grid of possible weights (66 points). We will then apply a temperature-scaled softmax to create smooth, expected-weight targets, minimizing MSE loss against these expected targets.
+*   **Feature Extraction:** A dedicated module to extract 8 lightweight linguistic features from the query: diacritic ratio, compound word ratio, English token ratio, tech-term ratio, clause count, question-word presence, normalized query length, and out-of-vocabulary ratio against the BM25 corpus.
+*   **Adaptive MLP Fusion:** A 3-layer feed-forward neural network (Keras/TensorFlow, approx. 2,947 parameters; Dense+LayerNorm+GELU+Dropout blocks) taking the 8 features as input and outputting a softmax distribution over the 3 retrieval signals (dense, BM25, sparse) to guarantee weights sum to 1.
+*   **Soft-Label Training Strategy:** To train the MLP without ground-truth weights, we will compute NDCG@10 across a 3D simplex grid of possible weights (231 points at step 0.05). We will then apply a temperature-scaled softmax to create smooth, expected-weight targets, minimizing MSE loss against these expected targets.
 
 ## 4. Contributions
 While hybrid retrieval is well-studied for English, our approach introduces several novelties:
 *   **Dynamic vs. Fixed Weights:** Unlike standard approaches (e.g., Reciprocal Rank Fusion or fixed linear interpolation) that use the same static weights for all queries, our system computes custom fusion weights *per query*.
-*   **Vietnamese-Aware Design:** The system explicitly models the nuances of the Vietnamese language through a custom 7-feature extractor, rather than applying language-agnostic statistical methods.
+*   **Vietnamese-Aware Design:** The system explicitly models the nuances of the Vietnamese language through a custom 8-feature extractor, rather than applying language-agnostic statistical methods.
 *   **Soft-Label Simplex Supervision:** Instead of using hard argmax labels (which cause the model to collapse onto a single retriever and perform poorly), we introduce a temperature-scaled soft-label strategy over a 3D simplex grid, avoiding tie-breaking ambiguity and ensuring smooth gradient updates.
 
 ## 5. Timeline
@@ -35,7 +35,7 @@ While hybrid retrieval is well-studied for English, our approach introduces seve
     *   Set up BM25 retrieval (underthesea segmentation + BM25Okapi).
     *   Set up BGE-M3 Learned Sparse retrieval (inverted index).
 *   **Week 3: Feature Extractor Development**
-    *   Implement the Vietnamese-aware 7-feature extractor.
+    *   Implement the Vietnamese-aware 8-feature extractor.
     *   Run feature extraction over the training and dev query sets.
 *   **Week 4: Fusion Model & Training Pipeline**
     *   Build the 3-layer MLP fusion module.

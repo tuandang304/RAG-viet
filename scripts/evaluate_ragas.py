@@ -128,8 +128,7 @@ def build_samples(
     fixed_w: tuple[float, ...] | None,
     top_k: int,
     bm25_vocab: set[str] | None = None,
-) -> tuple[list[SingleTurnSample], list[str]]:
-    """Return (samples, sample_qa_ids) — qa_ids preserved for incremental runs."""
+) -> list[SingleTurnSample]:
     samples = []
     sample_ids: list[str] = []
     for qa in tqdm(qas, desc=f"  Retrieving+generating [{method}]"):
@@ -315,7 +314,7 @@ def main() -> None:
 
     dense  = DenseRetriever.load(args.index_dir)
     bm25   = BM25Retriever.load(str(Path(args.index_dir) / "bm25.pkl"))
-    bm25_vocab = set(bm25._bm25.idf.keys())
+    bm25_vocab = bm25.vocab
     hybrid = HybridRetriever(dense, bm25, sparse=sparse)
     mlp    = FusionMLP.load(args.mlp_path)
 

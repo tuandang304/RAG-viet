@@ -1,3 +1,4 @@
+from ..utils.metrics import min_max_normalize as _min_max_normalize
 from .bm25 import BM25Retriever
 from .dense import DenseRetriever
 from .embedder import embed_query
@@ -8,16 +9,6 @@ Hit = tuple[str, str, float]
 
 # Fusion channel order: weights are (w_dense, w_bm25, w_sparse, w_toneless)
 CHANNELS = ("dense", "bm25", "sparse", "toneless")
-
-
-def _min_max_normalize(scores: dict[str, float]) -> dict[str, float]:
-    if not scores:
-        return scores
-    min_s, max_s = min(scores.values()), max(scores.values())
-    span = max_s - min_s
-    if span == 0:
-        return {k: 0.0 for k in scores}
-    return {k: (v - min_s) / span for k, v in scores.items()}
 
 
 class HybridRetriever:

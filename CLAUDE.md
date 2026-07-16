@@ -110,6 +110,8 @@ src/rag_vie/                   # Package chính (installable) — mọi library 
 │   ├── validate.py            # validate semantic similarity ≥ threshold
 │   └── run_all.py             # python -m rag_vie.datagen.run_all
 ├── utils/
+│   ├── metrics.py             # ndcg/mrr/map/recall/hit_at_1 + min_max_normalize (dùng chung train + eval)
+│   ├── fusion.py              # fuse_scores: a·dense + b·bm25 + c·sparse + d·toneless
 │   └── text.py                # remove_diacritics, ...
 └── pipeline.py                # RAGPipeline.run(query) → RAGResult
 
