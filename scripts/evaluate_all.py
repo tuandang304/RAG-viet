@@ -90,9 +90,14 @@ STRATA: list[dict] = [
 
 # Fusion methods. Weights are (w_dense, w_bm25, w_sparse, w_toneless);
 # toneless-specific methods are added only when a toneless index is loaded.
-def build_methods(has_toneless: bool) -> dict[str, tuple[float, float, float, float] | None]:
-    methods: dict[str, tuple[float, float, float, float] | None] = {
+# Value None = dynamic MLP routing; "rrf" = rank-based reciprocal rank fusion.
+def build_methods(
+    has_toneless: bool,
+    extra_fixed: dict[str, tuple[float, ...]] | None = None,
+) -> dict[str, tuple[float, ...] | str | None]:
+    methods: dict[str, tuple[float, ...] | str | None] = {
         "mlp":          None,
+        "rrf":          "rrf",                  # reciprocal rank fusion over available channels
         "fixed_equal":  (1/3, 1/3, 1/3, 0.0),
         "dense_bm25":   (0.5, 0.5, 0.0, 0.0),   # former 2-way hybrid (for backward comparison)
         "dense":        (1.0, 0.0, 0.0, 0.0),
@@ -102,12 +107,30 @@ def build_methods(has_toneless: bool) -> dict[str, tuple[float, float, float, fl
     if has_toneless:
         methods["toneless"]      = (0.0, 0.0, 0.0, 1.0)
         methods["fixed_equal_4"] = (0.25, 0.25, 0.25, 0.25)
+    for name, w in (extra_fixed or {}).items():
+        methods[name] = tuple(w) + (0.0,) * (4 - len(w))
     return methods
 
 
 # Baselines to compare MLP against in significance tests
-_SIG_BASELINES = ("fixed_equal", "dense_bm25", "dense", "bm25", "sparse")
+_SIG_BASELINES = ("rrf", "fixed_equal", "dense_bm25", "dense", "bm25", "sparse")
 _SIG_BASELINES_TONELESS = ("toneless", "fixed_equal_4")
+
+# RRF constant (Cormack et al. 2009 — standard k=60)
+RRF_K = 60
+
+
+def rrf_fuse(hit_lists: list[list], k_final: int, k_rrf: int = RRF_K) -> list[str]:
+    """Reciprocal rank fusion: score(d) = Σ_ch 1 / (k + rank_ch(d)).
+
+    Hit lists must be rank-sorted (all retrievers return descending scores).
+    Parameter-free w.r.t. score scales — the standard hybrid baseline.
+    """
+    scores: dict[str, float] = {}
+    for hits in hit_lists:
+        for rank, (pid, _, _) in enumerate(hits):
+            scores[pid] = scores.get(pid, 0.0) + 1.0 / (k_rrf + rank + 1)
+    return [p for p, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k_final]]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -177,8 +200,10 @@ def run_eval(
     weight_temperature: float = 0.05,
     toneless_r: BM25Retriever | None = None,
     k_toneless: int = 100,
+    extra_fixed: dict[str, tuple[float, ...]] | None = None,
+    query_embeddings: np.ndarray | None = None,
 ) -> dict:
-    methods = build_methods(has_toneless=toneless_r is not None)
+    methods = build_methods(has_toneless=toneless_r is not None, extra_fixed=extra_fixed)
     per_query: dict[str, dict[str, list]] = {
         m: {mt: [] for mt in ("ndcg10", "mrr10", "map10", "rec10", "rec100", "hit1")}
         for m in methods
@@ -209,13 +234,16 @@ def run_eval(
             "was not loaded — build it with build_index.py or pass --no-toneless off."
         )
 
-    for qa in tqdm(qas, desc="Evaluating"):
+    for qi, qa in enumerate(tqdm(qas, desc="Evaluating")):
         query    = qa["question"]
         relevant = set(qa["relevant_ids"])
 
         # Retrieve once per source, shared across all methods (and needed
         # BEFORE routing when the MLP consumes post-retrieval signals)
-        qemb   = embed_query(query)
+        if query_embeddings is not None:
+            qemb = query_embeddings[qi : qi + 1].astype(np.float32)
+        else:
+            qemb = embed_query(query)
         d_hits = dense.search(qemb, k_dense)
         b_hits = bm25_r.search(query, k_bm25)
         s_hits = sparse_r.search(query, k_sparse) if sparse_r is not None else []
@@ -258,8 +286,11 @@ def run_eval(
         t_norm = _minmax(t_raw)
 
         for method, fixed_w in methods.items():
-            w = w_mlp if fixed_w is None else fixed_w
-            ranked = fuse(d_norm, b_norm, s_norm, t_norm, w, k_final)
+            if fixed_w == "rrf":
+                ranked = rrf_fuse([d_hits, b_hits, s_hits, t_hits], k_final)
+            else:
+                w = w_mlp if fixed_w is None else fixed_w
+                ranked = fuse(d_norm, b_norm, s_norm, t_norm, w, k_final)
 
             acc = per_query[method]
             acc["ndcg10"].append(ndcg_at_k(ranked, relevant, 10))
@@ -292,7 +323,11 @@ def run_eval(
         }
 
     # ── 2. Statistical significance (MLP vs each baseline) ───────────────────
-    sig_baselines = _SIG_BASELINES + (_SIG_BASELINES_TONELESS if toneless_r is not None else ())
+    sig_baselines = (
+        _SIG_BASELINES
+        + (_SIG_BASELINES_TONELESS if toneless_r is not None else ())
+        + tuple(extra_fixed or ())
+    )
     mlp_ndcg = np.array(per_query["mlp"]["ndcg10"])
     significance = {
         f"mlp_vs_{b}": significance_tests(mlp_ndcg, np.array(per_query[b]["ndcg10"]))
@@ -501,6 +536,12 @@ def main() -> None:
                              "point (default; flat surface → ~equal weights) or argmax (legacy).")
     parser.add_argument("--weight-temperature", type=float, default=0.05,
                         help="Softmax temperature for --weight-mode expected (lower = sharper).")
+    parser.add_argument("--fixed-extra", action="append", default=[],
+                        help="Extra fixed-weight method 'name=a,b,c[,d]' — e.g. a dev-tuned "
+                             "weight vector. May be passed multiple times.")
+    parser.add_argument("--emb-cache",   default=None,
+                        help="Path to .npy cache of query embeddings (created on first run; "
+                             "later runs on the same qas/subset skip the FPT API entirely).")
     parser.add_argument("--output",      default=None, help="Save JSON to this path")
     args = parser.parse_args()
 
@@ -555,6 +596,28 @@ def main() -> None:
         qas = _rng.sample(qas, args.max_samples)
         print(f"Subsampled to {len(qas):,} queries (seed={args.subset_seed})")
 
+    extra_fixed: dict[str, tuple[float, ...]] = {}
+    for spec in args.fixed_extra:
+        name, _, vals = spec.partition("=")
+        extra_fixed[name.strip()] = tuple(float(v) for v in vals.split(","))
+
+    # Query embedding cache — must match the post-subsample query list exactly.
+    query_embeddings = None
+    if args.emb_cache:
+        from rag_vie.retrieval.embedder import embed_texts
+        queries = [qa["question"] for qa in qas]
+        if Path(args.emb_cache).exists():
+            query_embeddings = np.load(args.emb_cache)
+            if len(query_embeddings) != len(queries):
+                print(f"Embedding cache size mismatch ({len(query_embeddings)} != {len(queries)}) — re-embedding…")
+                query_embeddings = None
+        if query_embeddings is None:
+            print(f"Embedding {len(queries):,} queries via FPT API (batched)…", flush=True)
+            query_embeddings = embed_texts(queries, batch_size=32)
+            Path(args.emb_cache).parent.mkdir(parents=True, exist_ok=True)
+            np.save(args.emb_cache, query_embeddings)
+            print(f"  Cached → {args.emb_cache}")
+
     results = run_eval(
         qas, dense, bm25_r, mlp,
         k_dense, k_bm25, args.k_final,
@@ -563,6 +626,8 @@ def main() -> None:
         weight_mode=args.weight_mode,
         weight_temperature=args.weight_temperature,
         toneless_r=toneless_r,
+        extra_fixed=extra_fixed,
+        query_embeddings=query_embeddings,
     )
 
     # Index file sizes
