@@ -36,6 +36,8 @@ import random
 import warnings
 from pathlib import Path
 
+import numpy as np
+
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from openai import AsyncOpenAI
@@ -51,7 +53,12 @@ from ragas.metrics.collections import (
 from tqdm import tqdm
 
 from rag_vie.config import settings
-from rag_vie.features.vietnamese import extract_features
+from rag_vie.features.retrieval_signals import (
+    SIGNAL_NAMES,
+    SIGNAL_NAMES_4WAY,
+    extract_retrieval_signals,
+)
+from rag_vie.features.vietnamese import FEATURE_NAMES, extract_features
 from rag_vie.fusion.mlp import FusionMLP
 from rag_vie.generator.llm import generate
 from rag_vie.retrieval.bm25 import BM25Retriever
@@ -97,24 +104,18 @@ def make_ragas_embeddings():
 # ── Retrieval helpers ──────────────────────────────────────────────────────
 
 # Three-way fusion weight triples matching evaluate_all.py METHODS.
-METHODS: dict[str, tuple[float, float, float] | None] = {
-    "dynamic_mlp":   None,                # weights from MLP, predicted per query
-    "fixed_equal":   (1/3, 1/3, 1/3),     # uniform three-way
-    "dense_only":    (1.0, 0.0, 0.0),
-    "bm25_only":     (0.0, 1.0, 0.0),
-    "sparse_only":   (0.0, 0.0, 1.0),
-}
-
-
-def retrieve_contexts(
-    hybrid: "HybridRetriever",
-    passages_map: dict[str, str],
-    query: str,
-    weights: tuple[float, ...],
-    top_k: int,
-) -> list[str]:
-    hits = hybrid.retrieve(query, weights, settings.top_k_dense, settings.top_k_bm25, top_k)
-    return [passages_map[pid] for pid, _, _ in hits if pid in passages_map]
+def build_methods(has_toneless: bool) -> dict[str, tuple[float, ...] | None]:
+    methods: dict[str, tuple[float, ...] | None] = {
+        "dynamic_mlp":   None,                     # weights from MLP, predicted per query
+        "fixed_equal":   (1/3, 1/3, 1/3, 0.0),     # uniform three-way
+        "dense_only":    (1.0, 0.0, 0.0, 0.0),
+        "bm25_only":     (0.0, 1.0, 0.0, 0.0),
+        "sparse_only":   (0.0, 0.0, 1.0, 0.0),
+    }
+    if has_toneless:
+        methods["toneless_only"] = (0.0, 0.0, 0.0, 1.0)
+        methods["fixed_equal_4"] = (0.25, 0.25, 0.25, 0.25)
+    return methods
 
 
 # ── Build samples for one method ──────────────────────────────────────────
@@ -128,7 +129,13 @@ def build_samples(
     fixed_w: tuple[float, ...] | None,
     top_k: int,
     bm25_vocab: set[str] | None = None,
-) -> list[SingleTurnSample]:
+) -> tuple[list[SingleTurnSample], list[str]]:
+    # Mirror evaluate_all/pipeline: retrieve all channels first, then (for the
+    # dynamic method) build the full feature vector the checkpoint expects.
+    n_base = len(FEATURE_NAMES)
+    use_signals_4way = mlp.input_dim == n_base + len(SIGNAL_NAMES_4WAY)
+    use_signals = use_signals_4way or mlp.input_dim == n_base + len(SIGNAL_NAMES)
+
     samples = []
     sample_ids: list[str] = []
     for qa in tqdm(qas, desc=f"  Retrieving+generating [{method}]"):
@@ -137,12 +144,26 @@ def build_samples(
         if not ground_truth:
             continue
 
+        hits = hybrid.search_all(query, settings.top_k_dense, settings.top_k_bm25)
+
         if fixed_w is not None:
             weights = fixed_w
         else:
-            weights = mlp.predict_weights(extract_features(query, bm25_vocab=bm25_vocab))
+            features = extract_features(query, bm25_vocab=bm25_vocab)
+            if use_signals:
+                signals = extract_retrieval_signals(
+                    {pid: s for pid, _, s in hits["dense"]},
+                    {pid: s for pid, _, s in hits["bm25"]},
+                    {pid: s for pid, _, s in hits["sparse"]},
+                    toneless_scores=(
+                        {pid: s for pid, _, s in hits["toneless"]} if use_signals_4way else None
+                    ),
+                )
+                features = np.concatenate([features, signals])
+            weights = mlp.predict_weights(features)
 
-        contexts = retrieve_contexts(hybrid, passages_map, query, weights, top_k)
+        fused = hybrid.fuse(hits, weights, top_k)
+        contexts = [passages_map[pid] for pid, _, _ in fused if pid in passages_map]
         if not contexts:
             continue
 
@@ -245,12 +266,18 @@ def main() -> None:
     parser.add_argument("--mlp-path",    required=True)
     parser.add_argument("--n-samples",   type=int, default=50)
     parser.add_argument("--top-k",       type=int, default=10)
-    parser.add_argument("--methods",     default="dynamic_mlp,fixed_equal,dense_only,bm25_only,sparse_only",
-                        help="Comma-separated methods to evaluate (3-way names)")
+    parser.add_argument("--methods",     default="dynamic_mlp,fixed_equal_4,toneless_only,dense_only",
+                        help="Comma-separated methods to evaluate")
     parser.add_argument("--sparse-path", default=None,
                         help="Sparse index pkl (default: <index-dir>/sparse.pkl)")
     parser.add_argument("--no-sparse",   action="store_true",
                         help="Disable sparse retriever (run 2-way only)")
+    parser.add_argument("--no-toneless", action="store_true",
+                        help="Skip the toneless BM25 channel even when bm25_toneless.pkl exists")
+    parser.add_argument("--judge-model", default="Llama-3.3-70B-Instruct",
+                        help="LLM for answer generation + RAGAS judging. Default is a "
+                             "non-reasoning instruct model — reasoning models burn the "
+                             "token budget on thinking and return empty judgements.")
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--output",      default=None)
     parser.add_argument("--exclude-ids", default=None,
@@ -258,6 +285,10 @@ def main() -> None:
                              "Used by extend-to-N orchestrators to skip queries "
                              "already evaluated in an earlier run.")
     args = parser.parse_args()
+
+    # Both answer generation (generator/llm.py) and the RAGAS judge read
+    # settings.fpt_llm_model — point them at the non-reasoning judge model.
+    settings.fpt_llm_model = args.judge_model
 
     random.seed(args.seed)
 
@@ -315,11 +346,20 @@ def main() -> None:
     dense  = DenseRetriever.load(args.index_dir)
     bm25   = BM25Retriever.load(str(Path(args.index_dir) / "bm25.pkl"))
     bm25_vocab = bm25.vocab
-    hybrid = HybridRetriever(dense, bm25, sparse=sparse)
+
+    toneless = None
+    if not args.no_toneless:
+        toneless_path = Path(args.index_dir) / "bm25_toneless.pkl"
+        if toneless_path.exists():
+            toneless = BM25Retriever.load(toneless_path)
+            print(f"Toneless index loaded from {toneless_path}", flush=True)
+
+    hybrid = HybridRetriever(dense, bm25, sparse=sparse, toneless=toneless)
     mlp    = FusionMLP.load(args.mlp_path)
+    methods = build_methods(has_toneless=toneless is not None)
 
     # RAGAS judge
-    print("Initializing RAGAS judge (Qwen3-32B via FPT)…")
+    print(f"Initializing RAGAS judge ({args.judge_model} via FPT)…")
     ragas_llm = make_ragas_llm()
     ragas_emb = make_ragas_embeddings()
 
@@ -330,11 +370,11 @@ def main() -> None:
     per_sample_all: dict[str, dict] = {}
 
     for method in selected_methods:
-        fixed_w = METHODS.get(method)
-        use_mlp = (fixed_w is None and method == "dynamic_mlp")
-        if method not in METHODS:
+        if method not in methods:
             print(f"Unknown method '{method}', skipping")
             continue
+        fixed_w = methods.get(method)
+        use_mlp = (fixed_w is None and method == "dynamic_mlp")
 
         print(f"\n[{method}]")
         samples, sample_ids = build_samples(

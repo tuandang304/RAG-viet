@@ -36,12 +36,35 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 _SYSTEM_PROMPT = (
-    "Bạn là công cụ khôi phục dấu tiếng Việt. Giữ nguyên số lượng từ và trật "
-    "tự từ, không thêm bớt hay diễn giải. Chỉ trả về duy nhất câu đã khôi "
-    "phục dấu."
+    "Bạn là công cụ khôi phục dấu tiếng Việt. Cho một câu đã mất dấu, khôi "
+    "phục đầy đủ dấu. Giữ nguyên số lượng từ và trật tự từ, không thêm bớt "
+    "hay diễn giải. Chỉ in ra đúng câu đã khôi phục dấu, KHÔNG lời dẫn, "
+    "KHÔNG markdown, KHÔNG dấu ngoặc kép.\n"
+    "Ví dụ:\n"
+    "Vào: thu do cua viet nam la gi\n"
+    "Ra: Thủ đô của Việt Nam là gì\n"
+    "Vào: toi cuop tai san bi phat tu bao nhieu nam\n"
+    "Ra: Tội cướp tài sản bị phạt tù bao nhiêu năm"
 )
 
 _THINK_RE = re.compile(r"<think>.*?</think>", flags=re.S)
+# Preambles the model sometimes prepends despite instructions.
+_PREAMBLE_RE = re.compile(
+    r"^\s*(?:đã\s+)?(?:khôi\s+phục\s+dấu|câu\s+(?:đã\s+)?khôi\s+phục|kết\s+quả|ra)\s*:?\s*",
+    flags=re.I,
+)
+
+
+def _clean(text: str) -> str:
+    text = _THINK_RE.sub("", text).strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    line = lines[-1]                     # answer is the last content line
+    line = line.replace("**", "").replace("*", "")   # strip markdown emphasis
+    line = _PREAMBLE_RE.sub("", line)                # strip "Đã khôi phục dấu:" etc.
+    line = line.strip().strip('"').strip("'").strip("`").strip()
+    return line
 
 
 def restore_one(client: OpenAI, question: str) -> str:
@@ -49,21 +72,26 @@ def restore_one(client: OpenAI, question: str) -> str:
     # max_tokens (enable_thinking=False is ignored server-side) — too small a
     # budget yields finish_reason="length" with EMPTY content. Long legal
     # queries can burn >2k reasoning tokens, so escalate the budget once.
+    n_words = len(question.split())
     for max_tokens in (4096, 12288):
         response = client.chat.completions.create(
             model=settings.fpt_llm_model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": f"Khôi phục dấu tiếng Việt: {question}"},
+                {"role": "user", "content": f"Vào: {question}\nRa:"},
             ],
             max_tokens=max_tokens,
             temperature=0.0,
         )
-        text = response.choices[0].message.content or ""
-        text = _THINK_RE.sub("", text).strip()
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        if lines:
-            return lines[-1]
+        cleaned = _clean(response.choices[0].message.content or "")
+        if not cleaned:
+            continue
+        # Guard against the model rambling/expanding: word count must stay
+        # close to the input. Otherwise the restoration is untrustworthy —
+        # keep the noisy query so the baseline isn't unfairly polluted.
+        if abs(len(cleaned.split()) - n_words) <= max(2, round(0.3 * n_words)):
+            return cleaned
+        return question
     return question
 
 
