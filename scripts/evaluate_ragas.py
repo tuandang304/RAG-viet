@@ -230,6 +230,20 @@ def evaluate_method(
         "answer_relevancy":  [],
     }
 
+    # A single ragas metric.score() call can stall indefinitely (network hiccup
+    # or the internal instructor loop retrying a malformed structured output).
+    # Run each in a throwaway single-thread executor and abandon it on timeout —
+    # one bad sample must not hang a multi-hour evaluation.
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FutureTimeout
+
+    def _score_with_timeout(metric, kwargs, timeout: float = 120.0):
+        ex = ThreadPoolExecutor(max_workers=1)
+        try:
+            return ex.submit(lambda: metric.score(**kwargs)).result(timeout=timeout)
+        finally:
+            ex.shutdown(wait=False)   # don't block on an abandoned hung call
+
     for s in tqdm(samples, desc="  RAGAS scoring"):
         for name, metric in [
             ("context_precision", cp),
@@ -239,11 +253,13 @@ def evaluate_method(
         ]:
             val_to_record: float | None = None
             try:
-                result = metric.score(**_kw_for(name, s))
+                result = _score_with_timeout(metric, _kw_for(name, s))
                 val = getattr(result, "value", None)
                 if val is not None and not (isinstance(val, float) and val != val):
                     val_to_record = float(val)
                     scores[name].append(val_to_record)
+            except FutureTimeout:
+                print(f"    [warn] {name} timed out on a sample — skipped", flush=True)
             except Exception as e:
                 print(f"    [warn] {name} failed on a sample: {type(e).__name__}: {e}", flush=True)
             per_sample[name].append(val_to_record)
