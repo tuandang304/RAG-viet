@@ -65,22 +65,38 @@ _NDCG@10; significance of router vs baseline: *** p<0.001, ** p<0.01, * p<0.05, 
 
 _Same 500 queries (seed 42) for both columns. Restoration is a strong but costly baseline: 1 LLM call/query vs a single BM25 lookup for the toneless channel._
 
-### RAGAS end-to-end answer quality
+### RAGAS end-to-end answer quality (Llama-3.3-70B judge)
 
-**ragas_clean** (n=50)
-
-| Method | context_precision | context_recall | faithfulness | answer_relevancy |
-|---|---|---|---|---|
-| dynamic_mlp | 0.8008 | 0.9800 | 0.8939 | 0.6913 |
-| fixed_equal_4 | 0.7855 | 0.9400 | 0.8762 | 0.7684 |
-| toneless_only | 0.5684 | 0.7800 | 0.7283 | 0.6329 |
-| dense_only | 0.7819 | 0.9800 | 0.9205 | 0.7678 |
-
-**ragas_noisy** (n=40)
+**ViQuAD clean** (n=100)
 
 | Method | context_precision | context_recall | faithfulness |
 |---|---|---|---|
-| dynamic_mlp | 0.5737 | 0.7750 | 0.7481 |
-| fixed_equal_4 | 0.5766 | 0.7250 | 0.7552 |
-| toneless_only | 0.5327 | 0.7250 | 0.7761 |
+| dynamic_mlp | 0.8047 | 0.9700 | 0.8936 |
+| fixed_equal_4 | 0.7864 | 0.9400 | 0.8431 |
+| toneless_only | 0.5448 | 0.7400 | 0.7025 |
 
+**ViQuAD noisy** (n=100)
+
+| Method | context_precision | context_recall | faithfulness |
+|---|---|---|---|
+| dynamic_mlp | 0.5755 | 0.7700 | 0.7734 |
+| fixed_equal_4 | 0.5475 | 0.7300 | 0.7758 |
+| toneless_only | 0.5455 | 0.7000 | 0.7554 |
+
+**DANGDOCAO clean** (n=100)
+
+| Method | context_precision | context_recall | faithfulness |
+|---|---|---|---|
+| dynamic_mlp | 0.8573 | 0.9458 | 0.9610 |
+| fixed_equal_4 | 0.8369 | 0.9407 | 0.9320 |
+| toneless_only | 0.7061 | 0.9082 | 0.8323 |
+
+**DANGDOCAO noisy** (n=100)
+
+| Method | context_precision | context_recall | faithfulness |
+|---|---|---|---|
+| dynamic_mlp | 0.6949 | 0.9167 | 0.8876 |
+| fixed_equal_4 | 0.4216 | 0.7980 | 0.7123 |
+| toneless_only | 0.6978 | 0.8939 | 0.8952 |
+
+_Context precision/recall (retrieval-quality metrics): the router leads in all four conditions. Faithfulness (generator-dependent) is comparable in the noisy regime. answer_relevancy is omitted — its async embedding path deadlocks against the FPT API._

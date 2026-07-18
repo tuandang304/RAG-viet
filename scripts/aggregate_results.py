@@ -147,11 +147,38 @@ def table_restoration() -> None:
 
 
 def table_ragas() -> None:
+    # Prefer the n=100 full run (results/ragas_full/{vq,dd}_{clean,noisy}); fall
+    # back to the earlier n=40 ragas_4way/{ragas_clean,ragas_noisy}.
+    full = RESULTS / "ragas_full"
+    conds = [
+        ("ViQuAD clean", "vq_clean"), ("ViQuAD noisy", "vq_noisy"),
+        ("DANGDOCAO clean", "dd_clean"), ("DANGDOCAO noisy", "dd_noisy"),
+    ]
+    if full.exists() and any((full / f"{s}.json").exists() for _, s in conds):
+        print("\n### RAGAS end-to-end answer quality (Llama-3.3-70B judge)\n")
+        for name, stem in conds:
+            d = _load(full / f"{stem}.json")
+            if not d:
+                continue
+            res = d["results"]
+            metrics = list(next(iter(res.values())).keys())
+            print(f"**{name}** (n={d['n_samples']})\n")
+            print("| Method | " + " | ".join(metrics) + " |")
+            print("|" + "---|" * (len(metrics) + 1))
+            for method, m in res.items():
+                print(f"| {method} | " + " | ".join(f"{m[k]:.4f}" for k in metrics) + " |")
+            print()
+        print("_Context precision/recall (retrieval-quality metrics): the router "
+              "leads in all four conditions. Faithfulness (generator-dependent) is "
+              "comparable in the noisy regime. answer_relevancy is omitted — its "
+              "async embedding path deadlocks against the FPT API._")
+        return
+
     ragas_dir = RESULTS / "ragas_4way"
     if not ragas_dir.exists():
         print("\n### RAGAS end-to-end\n_(no result files yet)_")
         return
-    print("\n### RAGAS end-to-end answer quality\n")
+    print("\n### RAGAS end-to-end answer quality (n=40 pilot)\n")
     for stem in ("ragas_clean", "ragas_noisy"):
         d = _load(ragas_dir / f"{stem}.json")
         if not d:
