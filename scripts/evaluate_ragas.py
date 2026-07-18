@@ -185,26 +185,29 @@ def evaluate_method(
     samples: list[SingleTurnSample],
     ragas_llm,
     ragas_emb,
+    metric_names: list[str],
 ) -> tuple[dict[str, float], dict[str, list[float | None]]]:
-    """Score every sample against all four RAGAS metrics, return per-metric mean.
+    """Score every sample against the selected RAGAS metrics, return per-metric mean.
 
     RAGAS 0.4.3 split metrics into modern `collections.*` classes that take
     keyword args via `.score()` rather than the old `evaluate(samples, metrics)`
     function (which now rejects collection-style instances). We call each metric
     per sample and aggregate manually — slower than the batched legacy path but
     works with the modern instructor-based LLM factory.
-    """
-    cp = ContextPrecisionWithReference(llm=ragas_llm)
-    cr = ContextRecall(llm=ragas_llm)
-    fa = Faithfulness(llm=ragas_llm)
-    ar = AnswerRelevancy(llm=ragas_llm, embeddings=ragas_emb)
 
-    scores: dict[str, list[float]] = {
-        "context_precision": [],
-        "context_recall":    [],
-        "faithfulness":      [],
-        "answer_relevancy":  [],
+    NOTE: answer_relevancy routes through ragas' async embedding wrapper, which
+    deadlocks against the FPT embedding client (every call hits the per-call
+    timeout). It is off by default; the three LLM-judge metrics
+    (context precision/recall, faithfulness) are the retrieval-relevant ones.
+    """
+    _factory = {
+        "context_precision": lambda: ContextPrecisionWithReference(llm=ragas_llm),
+        "context_recall":    lambda: ContextRecall(llm=ragas_llm),
+        "faithfulness":      lambda: Faithfulness(llm=ragas_llm),
+        "answer_relevancy":  lambda: AnswerRelevancy(llm=ragas_llm, embeddings=ragas_emb),
     }
+    metric_objs = [(n, _factory[n]()) for n in metric_names]
+    scores: dict[str, list[float]] = {n: [] for n in metric_names}
 
     # Each metric in ragas 0.4.x takes its own exact kwargs. Pass only what
     # the metric needs — passing extras raises TypeError.
@@ -223,12 +226,7 @@ def evaluate_method(
         raise ValueError(name)
 
     # Per-sample raw scores, aligned to the samples list (None on failure).
-    per_sample: dict[str, list[float | None]] = {
-        "context_precision": [],
-        "context_recall":    [],
-        "faithfulness":      [],
-        "answer_relevancy":  [],
-    }
+    per_sample: dict[str, list[float | None]] = {n: [] for n in metric_names}
 
     # A single ragas metric.score() call can stall indefinitely (network hiccup
     # or the internal instructor loop retrying a malformed structured output).
@@ -245,12 +243,7 @@ def evaluate_method(
             ex.shutdown(wait=False)   # don't block on an abandoned hung call
 
     for s in tqdm(samples, desc="  RAGAS scoring"):
-        for name, metric in [
-            ("context_precision", cp),
-            ("context_recall",    cr),
-            ("faithfulness",      fa),
-            ("answer_relevancy",  ar),
-        ]:
+        for name, metric in metric_objs:
             val_to_record: float | None = None
             try:
                 result = _score_with_timeout(metric, _kw_for(name, s))
@@ -294,6 +287,10 @@ def main() -> None:
                         help="LLM for answer generation + RAGAS judging. Default is a "
                              "non-reasoning instruct model — reasoning models burn the "
                              "token budget on thinking and return empty judgements.")
+    parser.add_argument("--ragas-metrics",
+                        default="context_precision,context_recall,faithfulness",
+                        help="Comma-separated RAGAS metrics. answer_relevancy is excluded "
+                             "by default (its async embedding wrapper deadlocks on FPT).")
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--output",      default=None)
     parser.add_argument("--exclude-ids", default=None,
@@ -375,7 +372,8 @@ def main() -> None:
     methods = build_methods(has_toneless=toneless is not None)
 
     # RAGAS judge
-    print(f"Initializing RAGAS judge ({args.judge_model} via FPT)…")
+    ragas_metric_names = [m.strip() for m in args.ragas_metrics.split(",") if m.strip()]
+    print(f"Initializing RAGAS judge ({args.judge_model} via FPT); metrics={ragas_metric_names}")
     ragas_llm = make_ragas_llm()
     ragas_emb = make_ragas_embeddings()
 
@@ -405,7 +403,7 @@ def main() -> None:
             continue
 
         print(f"  Running RAGAS on {len(samples)} samples…")
-        metrics, per_sample = evaluate_method(samples, ragas_llm, ragas_emb)
+        metrics, per_sample = evaluate_method(samples, ragas_llm, ragas_emb, ragas_metric_names)
         all_results[method] = metrics
         per_sample_all[method] = {"qa_ids": sample_ids, "scores": per_sample}
         print(f"  {metrics}")
