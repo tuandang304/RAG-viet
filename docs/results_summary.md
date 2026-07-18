@@ -58,10 +58,12 @@ _NDCG@10; significance of router vs baseline: *** p<0.001, ** p<0.01, * p<0.05, 
 
 ### Diacritic restoration vs toneless channel (P1c)
 
-| Domain | Router on noisy | Router on restored | Δ |
+| Domain | Router on noisy | Router on restored | Δ (restore−noisy) |
 |---|---|---|---|
-| ViQuAD | 0.6405 | 0.8257 | +0.1852 |
-| DANGDOCAO | 0.6218 | 0.8198 | +0.1980 |
+| ViQuAD | 0.6564 | 0.8257 | +0.1693 |
+| DANGDOCAO | 0.6148 | 0.8198 | +0.2050 |
+
+_Same 500 queries (seed 42) for both columns. Restoration is a strong but costly baseline: 1 LLM call/query vs a single BM25 lookup for the toneless channel._
 
 ### RAGAS end-to-end answer quality
 

@@ -108,19 +108,28 @@ def table_curve() -> None:
 
 def table_restoration() -> None:
     print("\n### Diacritic restoration vs toneless channel (P1c)\n")
+    # Fair comparison uses the SAME 500 queries (p1_noisy500_*) when available,
+    # else falls back to the full noisy set (different n — flagged).
     pairs = [
-        ("ViQuAD", "p1_restored_viaquad.json", "p1_full_viaquad_noisy.json"),
-        ("DANGDOCAO", "p1_restored_dangdocao.json", "p1_full_dangdocao_noisy.json"),
+        ("ViQuAD", "p1_restored_viaquad.json",
+         "p1_noisy500_viaquad.json", "p1_full_viaquad_noisy.json"),
+        ("DANGDOCAO", "p1_restored_dangdocao.json",
+         "p1_noisy500_dangdocao.json", "p1_full_dangdocao_noisy.json"),
     ]
     any_row = False
-    print("| Domain | Router on noisy | Router on restored | Δ |")
+    fallback_used = False
+    print("| Domain | Router on noisy | Router on restored | Δ (restore−noisy) |")
     print("|---|---|---|---|")
-    for dom, restored_f, noisy_f in pairs:
+    for dom, restored_f, noisy500_f, noisy_full_f in pairs:
         r = _load(RESULTS / restored_f)
-        n = _load(RESULTS / noisy_f)
         if not r:
             continue
         any_row = True
+        n = _load(RESULTS / noisy500_f)
+        if n is None:
+            n = _load(RESULTS / noisy_full_f)
+            if n is not None:
+                fallback_used = True
         r_mlp = r["methods"]["mlp"]["NDCG@10"]
         n_mlp = n["methods"]["mlp"]["NDCG@10"] if n else None
         delta = f"{r_mlp - n_mlp:+.4f}" if n_mlp is not None else "—"
@@ -128,6 +137,13 @@ def table_restoration() -> None:
         print(f"| {dom} | {noisy_cell} | {r_mlp:.4f} | {delta} |")
     if not any_row:
         print("_(no restoration result files yet)_")
+    elif fallback_used:
+        print("\n_Note: noisy column uses the full noisy set (n differs from the "
+              "restored 500) — run p1_noisy500_* for an exact same-query comparison._")
+    else:
+        print("\n_Same 500 queries (seed 42) for both columns. Restoration is a "
+              "strong but costly baseline: 1 LLM call/query vs a single BM25 lookup "
+              "for the toneless channel._")
 
 
 def table_ragas() -> None:
