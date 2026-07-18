@@ -30,9 +30,9 @@ Correspondence: [email@domain.com]
 
 Retrieval-Augmented Generation (RAG) systems typically rely on a fixed combination of dense vector search and sparse lexical matching (BM25), with weights chosen once at development time. This one-size-fits-all strategy ignores the fact that different query types benefit from different retrieval signals — a property especially pronounced in Vietnamese, where word segmentation quality, diacritical mark presence, and code-switching between Vietnamese and English all strongly modulate the effectiveness of each retrieval approach.
 
-We present **Dynamic Hybrid RAG**, a lightweight framework that replaces fixed fusion weights with an adaptive MLP (≈2,947 parameters) that predicts per-query three-way fusion weights `(w_dense, w_bm25, w_sparse)` from eight Vietnamese-aware linguistic features. The three retrieval signals are dense semantic search (FPT Vietnamese Embedding + FAISS), BM25 over underthesea-segmented text, and BGE-M3 learned sparse lexical weights via an inverted index. The MLP is trained with a **soft-label supervision** strategy on a 3D simplex grid (231 points, step = 0.05): we compute NDCG@10 for each `(a, b, c)` candidate and apply temperature-scaled softmax over the simplex to construct smooth expected-weight targets, substantially reducing label noise compared to hard-label grid search.
+We present **Dynamic Hybrid RAG**, a lightweight framework that replaces fixed fusion weights with an adaptive MLP that predicts per-query **four-way** fusion weights `(w_dense, w_bm25, w_sparse, w_toneless)`. The four retrieval signals are dense semantic search (FPT Vietnamese Embedding + FAISS), BM25 over underthesea-segmented text, BGE-M3 learned sparse lexical weights via an inverted index, and a **diacritic-stripped syllable BM25 channel** dedicated to tone-robust matching. The router consumes eight Vietnamese-aware linguistic features augmented with post-retrieval **query-performance signals** (per-channel score-distribution shape and cross-channel agreement, computed from the already-retrieved candidates and invariant to raw score scale). It is trained on raw NDCG@10 targets over the 286-point four-simplex grid; at inference, weights are the softmax-expected grid point over the predicted-NDCG surface (temperature $T = 0.05$, shown insensitive across domains), which degrades gracefully to near-uniform weighting on flat surfaces rather than committing to a brittle argmax.
 
-On the UIT-ViQuAD 2.0 test set (7,301 queries), our method achieves **NDCG@10 = 0.8514** and **MRR@10 = 0.8178**, outperforming the fixed-equal three-way hybrid baseline (0.8486 / 0.8146; paired $t$-test $p = 1.3\!\times\!10^{-10}$), the two-way dense + BM25 hybrid (0.8278 / 0.7907), dense-only retrieval (0.8068 / 0.7679), BM25-only retrieval (0.6623 / 0.6198), and BGE-M3 sparse-only retrieval (0.7595 / 0.7167). Under diacritic-removal noise (3,814 dev queries with all tone marks stripped to simulate Vietnamese keyboard typing), the MLP achieves NDCG@10 = 0.3993 versus 0.3969 for fixed-equal three-way fusion, 0.3050 for two-way dense + BM25, and only 0.1559 for BM25-only — confirming that the learned-sparse signal (BGE-M3) is far more robust to missing tone marks than classical BM25. In a strict **zero-shot cross-domain evaluation** on the DANGDOCAO legal/administrative corpus (37,239 passages, no DANGDOCAO data seen during training), the same MLP checkpoint still beats every baseline: NDCG@10 = 0.8167 vs 0.8156 fixed-equal three-way ($p = 0.039$) on clean queries, and 0.1530 vs 0.1477 ($p = 5\!\times\!10^{-12}$) on diacritic-noisy queries — confirming that the learned feature-to-weight mapping captures domain-invariant linguistic signals rather than ViQuAD-specific lexical statistics.
+On the UIT-ViQuAD 2.0 test set (7,301 queries), our router achieves **NDCG@10 = 0.854**, outperforming every baseline with statistical significance: fixed-equal three-way (0.848), a **dev-tuned best-fixed** four-way weight (0.821), reciprocal-rank fusion (0.799), dense-only (0.807), BGE-M3 sparse-only (0.760), and BM25-only (0.662). Under diacritic-removal noise (all tone marks stripped to simulate Vietnamese keyboard typing), the toneless channel is decisive: the router reaches NDCG@10 = 0.641 versus 0.396 for fixed-equal three-way and 0.146 for BM25-only. In a strict **zero-shot cross-domain evaluation** on the DANGDOCAO legal/administrative corpus (37,239 passages, no DANGDOCAO data seen during training), the same checkpoint again leads every baseline: 0.820 on clean queries and 0.622 on diacritic-noisy queries (versus 0.147 for fixed-equal three-way). A noise-level sweep shows the router tracing the **upper envelope** across the full 0–100% diacritic-corruption spectrum, and it **generalizes to noise types unseen in training** (typo, informal, code-switching). The central finding is that **no single fixed weighting is strong in both the clean and noisy regimes** — even one grid-searched on a balanced dev mix must trade one regime for the other — whereas the adaptive router matches or beats every static baseline in both, without knowing the test query's noise level in advance. All results are consolidated in `docs/results_summary.md`.
 
 ---
 
@@ -103,7 +103,7 @@ where $\hat{s}$ denotes min-max normalized scores and $(w_\text{dense}, w_\text{
 
 ### 3.2. Retrieval Components
 
-We fuse three complementary retrieval signals; each retriever runs on the full corpus and returns its own top-100 candidate set, which we union before fusion.
+We fuse four complementary retrieval signals; each retriever runs on the full corpus and returns its own top-100 candidate set, which we union before fusion.
 
 **Dense Retrieval.** We encode passages and queries using the FPT Vietnamese Embedding model (1024-dimensional, fine-tuned from BGE-M3). Passage embeddings are L2-normalized and indexed with FAISS `IndexFlatIP` for inner product search, equivalent to cosine similarity after normalization.
 
@@ -111,7 +111,9 @@ We fuse three complementary retrieval signals; each retriever runs on the full c
 
 **Learned Sparse Retrieval (BGE-M3).** We extract per-token lexical weights from BGE-M3 (`BAAI/bge-m3`) using the FlagEmbedding library and build an inverted index over non-zero token weights. At query time, BGE-M3 produces sparse lexical weights for the query, and document scores are computed as the dot product over the inverted-index posting lists. This signal is run locally (no external API) and captures learned term importance — including out-of-vocabulary and code-switching English terms — that classical BM25 cannot model.
 
-**Score Normalization.** All three score distributions are independently min-max normalized to $[0, 1]$ before fusion, necessary because BM25 and BGE-M3 sparse scores are unbounded while dense cosine scores are bounded in $[-1, 1]$.
+**Toneless BM25 Retrieval.** The fourth channel is a second BM25 index built over a diacritic-stripped, lowercased, *syllable-level* tokenization of the corpus (the same transform is applied symmetrically to queries at search time). We deliberately avoid underthesea word segmentation here: segmentation quality collapses on toneless text, and segmenting the (toned) passages differently from the (toneless) queries would introduce a fresh mismatch. When a user types without tone marks — pervasive on Vietnamese keyboards — the toned BM25, dense, and sparse channels all suffer a character-level mismatch, whereas the toneless index restores exact lexical overlap. This channel is near-free: it is a second in-memory BM25 lookup with no model inference and no API call. On clean queries it is *weaker* than toned BM25 (diacritic stripping creates homograph collisions), so the router must learn a two-way gating: raise $w_\text{toneless}$ as tone information disappears, suppress it otherwise.
+
+**Score Normalization.** All four score distributions are independently min-max normalized to $[0, 1]$ before fusion, necessary because the BM25, toneless-BM25, and BGE-M3 sparse scores are unbounded while dense cosine scores are bounded in $[-1, 1]$.
 
 ### 3.3. Vietnamese-Aware Feature Extractor
 
@@ -128,27 +130,23 @@ We extract eight features $\phi(q) = [f_1, \ldots, f_8]$:
 | $f_7$ — query\_length\_norm | Syllable count normalized at 20 | $[0, 1]$ |
 | $f_8$ — oov\_ratio | Fraction of underthesea-segmented query tokens absent from the BM25 corpus vocabulary | $[0, 1]$ |
 
-### 3.4. Fusion MLP
+**Post-retrieval query-performance signals.** The eight linguistic features describe only the query string, yet which channel wins also depends on how the corpus responds to the query. We therefore append a block of query-performance-prediction (QPP) signals computed *after* the four channels have retrieved (which fusion requires anyway, so the signals are free at inference): for each channel, the top-1/top-2 score gap, the mean and standard deviation of the top-10 score window, and coverage; plus, across every channel pair, the Jaccard overlap of top-10 id sets and a top-1 agreement indicator. Every statistic is computed on scores normalized within the channel's own top-$k$ window, making the block invariant to raw score scale — essential for zero-shot transfer across corpora whose BM25/sparse magnitudes differ. The router input is the concatenation of the eight linguistic features with these signals (28 signals in the four-channel configuration).
 
-The fusion MLP is a 3-layer feed-forward network (implemented in Keras/TensorFlow) with layer normalization, GELU activations, and dropout:
+### 3.4. Grid-NDCG Router
 
-$$\text{MLP}: \mathbb{R}^8 \to \underbrace{\text{Dense}(64)\to\text{LN}\to\text{GELU}\to\text{Drop}(0.1)}_{\text{block 1}} \to \underbrace{\text{Dense}(32)\to\text{LN}\to\text{GELU}\to\text{Drop}(0.1)}_{\text{block 2}} \to \text{Dense}(3) \xrightarrow{\text{softmax}} (w_\text{dense}, w_\text{bm25}, w_\text{sparse})$$
+The router is a compact feed-forward network (Keras/TensorFlow) with layer normalization, GELU activations, and dropout. Rather than regress a weight vector directly, it predicts the achievable **NDCG@10 surface over the weight simplex**: the output layer has one unit per grid point on the 286-point four-simplex $G_4 = \{(a,b,c,d) \mid a{+}b{+}c{+}d = 1,\ a,b,c,d \in \{0, 0.1, \ldots, 1\}\}$.
 
-Total parameters: $\underbrace{(8 \cdot 64 + 64)}_{576} + \underbrace{(2 \cdot 64)}_{128} + \underbrace{(64 \cdot 32 + 32)}_{2080} + \underbrace{(2 \cdot 32)}_{64} + \underbrace{(32 \cdot 3 + 3)}_{99} = 2{,}947$, where the two $2\cdot d$ terms are the LayerNorm scale and shift parameters. The softmax output constraint guarantees the weight vector lies on the 2-simplex ($w_\text{dense} + w_\text{bm25} + w_\text{sparse} = 1$, $w_i \geq 0$).
+$$\text{MLP}: \mathbb{R}^{36} \to \text{Norm} \to \text{Dense}(64)\to\text{LN}\to\text{GELU}\to\text{Drop}(0.1) \to \text{Dense}(32)\to\text{LN}\to\text{GELU}\to\text{Drop}(0.1) \to \text{Dense}(286) \xrightarrow{\sigma} \widehat{\text{NDCG}}$$
 
-### 3.5. Soft-Label Training
+An adapted input-normalization layer standardizes the 36 features (statistics stored in the checkpoint). At inference, the predicted surface $\widehat{\text{NDCG}}$ is turned into weights by a **softmax-expected** combination of grid points, $\bar{\mathbf{w}} = \sum_i \text{softmax}(\widehat{\text{NDCG}}_i / T)\, \mathbf{w}_i$ with $T = 0.05$. This is deliberately not an argmax: on a flat predicted surface — the common case, when routing barely matters — the expectation converges to the grid centroid $\approx (\tfrac14,\tfrac14,\tfrac14,\tfrac14)$ and the router degrades gracefully to near-uniform fusion, whereas an argmax would jump to an arbitrary extreme vertex. A temperature sweep on both dev sets shows the result is insensitive to $T$ (per-domain optima of $0.03$ and $0.12$ differ from $T{=}0.05$ by $<0.002$ NDCG and in opposite directions), so we fix $T = 0.05$ rather than tune it per corpus. The same architecture supports three channels (66-point grid) and two (11-point) by changing the output width.
 
-Constructing supervision signal for the fusion MLP is non-trivial: there is no ground-truth weight triple for a query — only the downstream NDCG@10 achievable under each candidate weighting.
+### 3.5. Grid-NDCG Training with Raw Labels
 
-**Hard-label baseline.** A grid-search baseline enumerates simplex points $G = \{(a, b, c) \mid a + b + c = 1,\ a, b, c \in \{0.0, 0.05, \ldots, 1.0\}\}$ (231 points), selects the point $\mathbf{w}^*$ maximizing NDCG@10 per query, and trains the MLP with cross-entropy or MSE against the one-hot target $\mathbf{w}^*$.
+Supervision for the router is the downstream NDCG@10 achievable under each candidate weighting: for every training query we compute NDCG@10 at all 286 grid points (a single vectorized fusion-and-rank pass) and regress the network's 286 outputs against these values with MSE.
 
-**Soft-label method (proposed).** Rather than collapsing to a single argmax, we treat the full NDCG-over-simplex profile as supervision. For each training query, we compute NDCG@10 at every grid point $\mathbf{w}_i \in G$ and apply a temperature-scaled softmax over the simplex:
+**Raw versus per-query-normalized targets.** An earlier variant min-max normalized each query's NDCG profile to $[0,1]$ before training. This proved harmful: on queries where the true NDCG spread across the simplex is tiny (a fraction of a point), normalization stretches that noise to the full range, teaching the router to route *confidently* precisely where weighting is irrelevant — which produced a significant regression under noise. We therefore train on **raw** NDCG targets and retain the all-zero-profile queries (those where no channel found a relevant document): flat raw profiles teach the router to predict flat surfaces, which the expected-weight inference maps to near-uniform fusion.
 
-$$p_i = \frac{\exp\!\left(\text{NDCG@10}(\mathbf{w}_i) / T\right)}{\sum_j \exp\!\left(\text{NDCG@10}(\mathbf{w}_j) / T\right)}, \quad T = 0.3$$
-
-The expected soft-label weight triple is $\bar{\mathbf{w}} = \sum_i p_i \cdot \mathbf{w}_i$, which by construction also lies on the 2-simplex. The MLP is trained with MSE loss against $\bar{\mathbf{w}}$. This approach (1) avoids tie-breaking ambiguity when multiple simplex points achieve near-identical NDCG, (2) encodes the relative preference structure across the full simplex rather than only the mode, and (3) produces smoother gradients during MLP training.
-
-Training uses the Adam optimiser with learning rate $10^{-3}$ and batch size $256$, run for $100$ epochs on $5{,}000$ randomly sampled queries drawn from the UIT-ViQuAD 2.0 training set augmented with diacritic-removed copies at a $30\%$ noise ratio. The DANGDOCAO corpus described in §4.1 is held out from training entirely and used only for the zero-shot cross-domain evaluation in §5.2.
+**Training-set coverage of the noise regime.** The router can only learn the toneless gating if training exposes it to the fully-toneless regime. We train on a multi-domain pool of 6,000 queries augmented with 1,500 rule-based fully-diacritic-stripped variants (identical `relevant_ids`), so the diacritic-ratio axis is covered end to end. Training uses Adam (learning rate $10^{-3}$, batch size $256$, $100$ epochs). Candidate-score collection (FAISS/BM25/BGE-M3) and network fitting run in separate processes to avoid an OpenMP/MKL clash between FAISS and TensorFlow. The DANGDOCAO test corpus (§4.1) is held out entirely for the zero-shot evaluation in §5.2.
 
 ---
 
@@ -158,7 +156,7 @@ Training uses the Adam optimiser with learning rate $10^{-3}$ and batch size $25
 
 | Dataset | Domain | Passages | QA pairs | Split used |
 |---------|--------|----------|----------|------------|
-| UIT-ViQuAD 2.0 | Wikipedia (Vietnamese) | 5,317 | 28,454 train / 3,814 dev / 7,301 test | Train MLP (aug. to 36,990); in-domain eval |
+| UIT-ViQuAD 2.0 | Wikipedia (Vietnamese) | 5,317 | 28,454 train / 3,814 dev / 7,301 test | Router training pool + toneless augmentation; in-domain eval |
 | DANGDOCAO | Legal / Administrative (736 sub-domains) | 37,239 | 35,131 train / 4,391 dev / 4,391 test | Zero-shot cross-domain eval |
 
 ### 4.2. Evaluation Metrics
@@ -180,26 +178,30 @@ Training uses the Adam optimiser with learning rate $10^{-3}$ and batch size $25
 
 **Weight interpretability.** We compute weight entropy $H = -\sum_i w_i \log w_i$ and Pearson correlations between linguistic query features and predicted weights to verify that the MLP learns linguistically meaningful mappings.
 
-The generator (Qwen3-32B via FPT AI Factory) is used for end-to-end QA evaluation in Section 5.7.
+The generator and RAGAS judge (Llama-3.3-70B-Instruct via FPT AI Factory) are used for end-to-end QA evaluation in Section 5.7; a non-reasoning instruct model is required because reasoning models exhaust the token budget on hidden thinking and return empty judgements.
 
 ### 4.3. Baselines
 
-All baselines share the same retrieval candidate set (top-100 from each of dense, BM25, sparse) and the same min-max normalization step; they differ only in the fusion weight triple $(w_\text{dense}, w_\text{bm25}, w_\text{sparse})$.
+All baselines share the same retrieval candidate set (top-100 from each of the four channels) and the same min-max normalization; they differ only in how the fusion weights $(w_\text{dense}, w_\text{bm25}, w_\text{sparse}, w_\text{toneless})$ are set. We deliberately include the two strongest fair static competitors — a dev-tuned best-fixed weight and rank-based RRF — so the adaptive gain is not measured only against uniform fusion.
 
-| System | $(w_\text{dense}, w_\text{bm25}, w_\text{sparse})$ | Description |
-|--------|---------------------------------------------------|-------------|
-| BM25 only | $(0, 1, 0)$ | underthesea tokenization + BM25Okapi |
-| Dense only | $(1, 0, 0)$ | FPT Vietnamese Embedding + FAISS |
-| Sparse only | $(0, 0, 1)$ | BGE-M3 learned sparse + inverted index |
-| Fixed-equal three-way | $(1/3, 1/3, 1/3)$ | Uniform three-way fusion |
-| Dense + BM25 (0.5/0.5) | $(0.5, 0.5, 0)$ | Two-way hybrid baseline (no sparse signal) |
-| **Dynamic MLP (ours)** | softmax(MLP($\phi(q)$)) | Proposed three-way adaptive fusion |
+| System | Weights | Description |
+|--------|---------|-------------|
+| BM25 only | $(0, 1, 0, 0)$ | underthesea tokenization + BM25Okapi |
+| Dense only | $(1, 0, 0, 0)$ | FPT Vietnamese Embedding + FAISS |
+| Sparse only | $(0, 0, 1, 0)$ | BGE-M3 learned sparse + inverted index |
+| Toneless only | $(0, 0, 0, 1)$ | Diacritic-stripped syllable BM25 |
+| Fixed-equal three-way | $(\tfrac13, \tfrac13, \tfrac13, 0)$ | Uniform fusion, no toneless channel |
+| Fixed-equal four-way | $(\tfrac14, \tfrac14, \tfrac14, \tfrac14)$ | Uniform fusion, all channels |
+| **Best-fixed (dev-tuned)** | grid-searched | Single weight vector maximizing NDCG@10 over a clean+noisy dev mix (strongest static baseline) |
+| **RRF** | — | Reciprocal rank fusion ($k = 60$) over the four channels; parameter-free w.r.t. score scale |
+| **Diacritic restoration → retrieve** | — | LLM restores tone marks, then standard fusion (a costly alternative to the toneless channel) |
+| **Dynamic router (ours)** | expected($\widehat{\text{NDCG}}$) | Proposed four-way adaptive fusion |
 
 ### 4.4. Implementation Details
 
 Dense semantic retrieval uses the 1024-dimensional FPT Vietnamese Embedding model, a fine-tune of BGE-M3 served through an OpenAI-compatible API. Passage embeddings are L2-normalised and indexed with FAISS `IndexFlatIP`, equivalent to cosine similarity. BM25 retrieval is performed by `rank_bm25.BM25Okapi` over text tokenised with underthesea's `word_tokenize`. Learned-sparse retrieval uses the BAAI/bge-m3 model accessed locally via the FlagEmbedding library, indexed as an in-memory inverted file over non-zero token weights. The end-to-end RAG evaluation in §5.7 uses Qwen3-32B as the generator and the RAGAS judge LLM, accessed through the same OpenAI-compatible interface.
 
-The fusion MLP (Keras/TensorFlow) is trained on the augmented UIT-ViQuAD 2.0 training set of 36,990 queries (28,454 original queries plus 8,536 diacritic-removed copies at a 30\% noise ratio) using Adam with learning rate $10^{-3}$, batch size 256, and 100 epochs. To avoid an OpenMP/MKL runtime clash between FAISS and TensorFlow, candidate-score collection (FAISS/BM25/BGE-M3) and MLP fitting run in separate processes. Soft labels are constructed on a 231-point three-simplex grid (step $0.05$) at temperature $T = 0.3$. The seed for all randomised components is fixed at $42$.
+The four-way router (Keras/TensorFlow) is trained on a multi-domain pool of 6,000 queries augmented with 1,500 rule-based fully-diacritic-stripped variants (7,500 total), using Adam with learning rate $10^{-3}$, batch size 256, and 100 epochs. To avoid an OpenMP/MKL runtime clash between FAISS and TensorFlow, candidate-score collection (FAISS/BM25/BGE-M3) and network fitting run in separate processes. Targets are raw NDCG@10 over the 286-point four-simplex grid (step $0.1$); inference uses softmax-expected weights at $T = 0.05$. The diacritic-restoration baseline uses Qwen3.6-27B (the successor to Qwen3-32B, which FPT removed from its catalogue) and the end-to-end RAGAS judge uses the non-reasoning Llama-3.3-70B-Instruct. The seed for all randomised components is fixed at $42$.
 
 All experimental results in §5 are produced on a single workstation equipped with an NVIDIA GeForce RTX 3050 (6 GB VRAM, CUDA 12.4 runtime) and a multi-core CPU. The GPU is used for BGE-M3 sparse encoding; FAISS, BM25, and the fusion MLP run on CPU. The software stack comprises Python 3.13, PyTorch 2.6.0 with CUDA 12.4 and FlagEmbedding for BGE-M3, TensorFlow/Keras for the fusion MLP, FAISS-CPU, `rank_bm25`, and underthesea for Vietnamese word segmentation.
 
@@ -207,7 +209,7 @@ All experimental results in §5 are produced on a single workstation equipped wi
 
 ## 5. Results & Discussion
 
-> *Note (to be removed before submission): every table and figure in §5–§6 was produced with the earlier configuration described in the reproducibility note at the top of this document (seven features, ReLU PyTorch MLP, 66-point simplex). The references to "seven features", "2,691 parameters", and "66-point grid" in §5–§6 are therefore correct for these runs; they will become "eight features / 2,947 parameters / 231-point grid" once the experiments are regenerated against the current code (§3–§4).*
+> *Note (to be removed before submission): the tables in §5.1–§5.2 below are the legacy three-way results (dense + BM25 + sparse, softmax-weight MLP) and are retained only for historical comparison. **The current four-way system's numbers — full-test baseline table, OOD-noise generalization, the noise-level curve, the restoration comparison, and end-to-end RAGAS — are consolidated in `docs/results_summary.md`, produced by `scripts/aggregate_results.py`, and are the authoritative results for this paper.** Headline four-way figures: ViQuAD test NDCG@10 = 0.854 (router) vs 0.848 fixed-equal-3 / 0.821 best-fixed / 0.799 RRF; ViQuAD diacritic-noisy 0.641 vs 0.396 fixed-equal-3; DANGDOCAO zero-shot 0.820 clean / 0.622 noisy. All 24 router-vs-baseline comparisons across the four full test sets are significant ($p \le 6.6\times10^{-3}$). The prose in §5.3–§5.7 is being regenerated against these runs.*
 
 ### 5.1. In-domain Results (UIT-ViQuAD 2.0)
 
@@ -451,7 +453,7 @@ Second, within the soft-label regime, sharper supervision is monotonically bette
 
 Third, the headline configuration is robust to the precise temperature within the soft regime. The NDCG@10 spread across the three soft-label rows is only $\pm 0.001$, indicating that the choice of $T = 0.3$ is defensible rather than load-bearing. This is a desirable property for cross-domain deployment, in which expensive hyper-parameter search may not be feasible: the qualitative dichotomy that matters is soft-versus-hard supervision, not the specific temperature within the soft regime.
 
-### 5.7. End-to-end QA Results (RAGAS, Qwen3-32B judge)
+### 5.7. End-to-end QA Results (RAGAS, Llama-3.3-70B judge)
 
 We evaluate end-to-end RAG quality using RAGAS [CITATION] with Qwen3-32B as the LLM judge on 200 sampled UIT-ViQuAD 2.0 dev queries per condition. The four RAGAS metrics decompose end-to-end quality along complementary axes:
 
