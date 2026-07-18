@@ -144,30 +144,37 @@ def build_samples(
         if not ground_truth:
             continue
 
-        hits = hybrid.search_all(query, settings.top_k_dense, settings.top_k_bm25)
+        # Retrieval + generation each hit the FPT API; a transient failure that
+        # survives the embedder's own retries must skip this sample, not crash
+        # the whole (multi-hour) run.
+        try:
+            hits = hybrid.search_all(query, settings.top_k_dense, settings.top_k_bm25)
 
-        if fixed_w is not None:
-            weights = fixed_w
-        else:
-            features = extract_features(query, bm25_vocab=bm25_vocab)
-            if use_signals:
-                signals = extract_retrieval_signals(
-                    {pid: s for pid, _, s in hits["dense"]},
-                    {pid: s for pid, _, s in hits["bm25"]},
-                    {pid: s for pid, _, s in hits["sparse"]},
-                    toneless_scores=(
-                        {pid: s for pid, _, s in hits["toneless"]} if use_signals_4way else None
-                    ),
-                )
-                features = np.concatenate([features, signals])
-            weights = mlp.predict_weights(features)
+            if fixed_w is not None:
+                weights = fixed_w
+            else:
+                features = extract_features(query, bm25_vocab=bm25_vocab)
+                if use_signals:
+                    signals = extract_retrieval_signals(
+                        {pid: s for pid, _, s in hits["dense"]},
+                        {pid: s for pid, _, s in hits["bm25"]},
+                        {pid: s for pid, _, s in hits["sparse"]},
+                        toneless_scores=(
+                            {pid: s for pid, _, s in hits["toneless"]} if use_signals_4way else None
+                        ),
+                    )
+                    features = np.concatenate([features, signals])
+                weights = mlp.predict_weights(features)
 
-        fused = hybrid.fuse(hits, weights, top_k)
-        contexts = [passages_map[pid] for pid, _, _ in fused if pid in passages_map]
-        if not contexts:
+            fused = hybrid.fuse(hits, weights, top_k)
+            contexts = [passages_map[pid] for pid, _, _ in fused if pid in passages_map]
+            if not contexts:
+                continue
+
+            answer = generate(query, contexts[:5])  # top-5 for generation
+        except Exception as e:
+            print(f"    [warn] sample skipped ({type(e).__name__}): {e}", flush=True)
             continue
-
-        answer = generate(query, contexts[:5])  # top-5 for generation
 
         samples.append(SingleTurnSample(
             user_input=query,
