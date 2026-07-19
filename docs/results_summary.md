@@ -65,6 +65,42 @@ _NDCG@10; significance of router vs baseline: *** p<0.001, ** p<0.01, * p<0.05, 
 
 _Same 500 queries (seed 42) for both columns. Restoration is a strong but costly baseline: 1 LLM call/query vs a single BM25 lookup for the toneless channel._
 
+### Component ablation (router NDCG@10, n=500/set, seed 42)
+
+| Configuration | ViQuAD clean | ViQuAD noisy | DANGDOCAO clean | DANGDOCAO noisy |
+|---|---|---|---|---|
+| Full system | 0.8598 | 0.6570 | 0.8291 | 0.6154 |
+| − expected weights (argmax) | 0.8589 | 0.6464 | 0.8238 | 0.6139 |
+| − QPP signals (8 linguistic feats) | 0.8632 | 0.6487 | 0.8223 | 0.6158 |
+| − raw labels (per-query min-max) | 0.8687 | 0.6391 | 0.8248 | 0.6167 |
+| − toneless augmentation | 0.8621 | 0.4834 | 0.8277 | 0.1427 |
+| − toneless channel (3-way routing) | 0.8670 | 0.4274 | 0.8261 | 0.1280 |
+
+**Oracle headroom** (label-dependent per-query best grid point — upper bound):
+
+| Set | Fixed equal 4-way | Router | Oracle | Headroom realized |
+|---|---|---|---|---|
+| ViQuAD clean | 0.8484 | 0.8598 | 0.9416 | 12% |
+| ViQuAD noisy | 0.5930 | 0.6570 | 0.7547 | 40% |
+| DANGDOCAO clean | 0.8118 | 0.8291 | 0.9298 | 15% |
+| DANGDOCAO noisy | 0.4157 | 0.6154 | 0.6704 | 78% |
+
+_Headroom realized = (router − equal4) / (oracle − equal4)._
+
+### Per-query latency breakdown (ms, ViQuAD n=500 run)
+
+| Stage | mean | p50 |
+|---|---|---|
+| dense | 1.6 | 1.4 |
+| bm25 | 15.5 | 14.5 |
+| sparse | 30.6 | 29.8 |
+| toneless | 19.0 | 18.2 |
+| features | 0.6 | 0.6 |
+| signals | 0.2 | 0.2 |
+| router MLP | 5.9 | — |
+
+_Dense = FAISS search only (query embedding is a cached/batched API call). The toneless channel adds one in-memory BM25 lookup; LLM diacritic restoration costs ~1.4–1.7 s/query wall-clock (measured over the two 500-query restoration runs) plus generation-side token spend._
+
 ### RAGAS end-to-end answer quality (Llama-3.3-70B judge)
 
 **ViQuAD clean** (n=100)
@@ -95,8 +131,37 @@ _Same 500 queries (seed 42) for both columns. Restoration is a strong but costly
 
 | Method | context_precision | context_recall | faithfulness |
 |---|---|---|---|
-| dynamic_mlp | 0.6949 | 0.9167 | 0.8876 |
-| fixed_equal_4 | 0.4216 | 0.7980 | 0.7123 |
-| toneless_only | 0.6978 | 0.8939 | 0.8952 |
+| dynamic_mlp | 0.6877 | 0.9217 | 0.8846 |
+| fixed_equal_4 | 0.4168 | 0.7778 | 0.7547 |
+| toneless_only | 0.6923 | 0.9040 | 0.8914 |
 
 _Context precision/recall (retrieval-quality metrics): the router leads in all four conditions. Faithfulness (generator-dependent) is comparable in the noisy regime. answer_relevancy is omitted — its async embedding path deadlocks against the FPT API._
+
+**RAGAS paired significance** (router vs baseline, per-sample paired t-test):
+
+| Condition | vs | metric | Δ | p |
+|---|---|---|---|---|
+| ViQuAD clean | fixed_equal_4 | context_precision | +0.0184 | 2.1e-01 ns |
+| ViQuAD clean | fixed_equal_4 | context_recall | +0.0300 | 8.3e-02 ns |
+| ViQuAD clean | fixed_equal_4 | faithfulness | +0.0515 | 1.3e-02 * |
+| ViQuAD clean | toneless_only | context_precision | +0.2599 | 5.3e-09 *** |
+| ViQuAD clean | toneless_only | context_recall | +0.2300 | 3.9e-07 *** |
+| ViQuAD clean | toneless_only | faithfulness | +0.1817 | 5.1e-05 *** |
+| ViQuAD noisy | fixed_equal_4 | context_precision | +0.0280 | 3.3e-01 ns |
+| ViQuAD noisy | fixed_equal_4 | context_recall | +0.0400 | 1.6e-01 ns |
+| ViQuAD noisy | fixed_equal_4 | faithfulness | -0.0024 | 9.5e-01 ns |
+| ViQuAD noisy | toneless_only | context_precision | +0.0300 | 1.4e-01 ns |
+| ViQuAD noisy | toneless_only | context_recall | +0.0700 | 1.9e-02 * |
+| ViQuAD noisy | toneless_only | faithfulness | +0.0168 | 5.8e-01 ns |
+| DANGDOCAO clean | fixed_equal_4 | context_precision | +0.0205 | 3.9e-02 * |
+| DANGDOCAO clean | fixed_equal_4 | context_recall | +0.0051 | 7.4e-01 ns |
+| DANGDOCAO clean | fixed_equal_4 | faithfulness | +0.0305 | 9.3e-02 ns |
+| DANGDOCAO clean | toneless_only | context_precision | +0.1512 | 1.1e-06 *** |
+| DANGDOCAO clean | toneless_only | context_recall | +0.0375 | 9.5e-02 ns |
+| DANGDOCAO clean | toneless_only | faithfulness | +0.1185 | 3.0e-03 ** |
+| DANGDOCAO noisy | fixed_equal_4 | context_precision | +0.2709 | 8.1e-14 *** |
+| DANGDOCAO noisy | fixed_equal_4 | context_recall | +0.1439 | 8.8e-05 *** |
+| DANGDOCAO noisy | fixed_equal_4 | faithfulness | +0.1174 | 9.8e-03 ** |
+| DANGDOCAO noisy | toneless_only | context_precision | -0.0046 | 6.0e-01 ns |
+| DANGDOCAO noisy | toneless_only | context_recall | +0.0177 | 3.4e-01 ns |
+| DANGDOCAO noisy | toneless_only | faithfulness | -0.0121 | 5.0e-01 ns |
