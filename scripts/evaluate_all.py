@@ -119,6 +119,45 @@ _SIG_BASELINES_TONELESS = ("toneless", "fixed_equal_4")
 # RRF constant (Cormack et al. 2009 — standard k=60)
 RRF_K = 60
 
+# 286-point four-simplex grid for the per-query oracle upper bound
+_N_GRID = 10
+ORACLE_GRID = np.array(
+    [
+        (i / _N_GRID, j / _N_GRID, k / _N_GRID, (_N_GRID - i - j - k) / _N_GRID)
+        for i in range(_N_GRID + 1)
+        for j in range(_N_GRID + 1 - i)
+        for k in range(_N_GRID + 1 - i - j)
+    ],
+    dtype=np.float32,
+)
+
+
+def oracle_best_weights(
+    norms: tuple[dict[str, float], ...],
+    relevant: set[str],
+) -> tuple[float, ...] | None:
+    """Best grid point (max NDCG@10) for THIS query — the routing upper bound.
+
+    Vectorized: S (n_ids × 4) @ gridᵀ → per-point top-10 DCG via argsort.
+    IDCG is constant per query, so argmax over DCG equals argmax over NDCG.
+    Label-dependent by construction — reported only as an upper bound, never
+    as a competing method.
+    """
+    all_ids = list(set().union(*(n.keys() for n in norms)))
+    if not all_ids:
+        return None
+    S = np.zeros((len(all_ids), len(norms)), dtype=np.float32)
+    for cj, nrm in enumerate(norms):
+        for ri, pid in enumerate(all_ids):
+            S[ri, cj] = nrm.get(pid, 0.0)
+    fused = S @ ORACLE_GRID.T
+    topn = min(10, len(all_ids))
+    order = np.argsort(-fused, axis=0, kind="stable")[:topn]
+    rel = np.fromiter((pid in relevant for pid in all_ids), dtype=bool, count=len(all_ids))
+    discounts = 1.0 / np.log2(np.arange(topn) + 2)
+    dcg = (rel[order] * discounts[:, None]).sum(axis=0)
+    return tuple(float(v) for v in ORACLE_GRID[int(dcg.argmax())])
+
 
 def rrf_fuse(hit_lists: list[list], k_final: int, k_rrf: int = RRF_K) -> list[str]:
     """Reciprocal rank fusion: score(d) = Σ_ch 1 / (k + rank_ch(d)).
@@ -202,11 +241,12 @@ def run_eval(
     k_toneless: int = 100,
     extra_fixed: dict[str, tuple[float, ...]] | None = None,
     query_embeddings: np.ndarray | None = None,
+    with_oracle: bool = False,
 ) -> dict:
     methods = build_methods(has_toneless=toneless_r is not None, extra_fixed=extra_fixed)
     per_query: dict[str, dict[str, list]] = {
         m: {mt: [] for mt in ("ndcg10", "mrr10", "map10", "rec10", "rec100", "hit1")}
-        for m in methods
+        for m in [*methods, *(["oracle"] if with_oracle else [])]
     }
     feat_idx = {name: i for i, name in enumerate(FEATURE_NAMES)}
     feat_rows: list[np.ndarray] = []
@@ -219,6 +259,10 @@ def run_eval(
     w_toneless_list: list[float] = []
     entropies:     list[float] = []
     mlp_us:        list[float] = []
+    # Per-stage latency accumulators (ms) — retrieval channels, features, signals
+    stage_ms: dict[str, list[float]] = {
+        s: [] for s in ("dense", "bm25", "sparse", "toneless", "features", "signals")
+    }
 
     # Checkpoints trained with post-retrieval signals expect 8+18 (3-way) or
     # 8+28 (4-way) inputs; legacy checkpoints expect the 8 linguistic features.
@@ -244,25 +288,38 @@ def run_eval(
             qemb = query_embeddings[qi : qi + 1].astype(np.float32)
         else:
             qemb = embed_query(query)
+
+        t0 = time.perf_counter()
         d_hits = dense.search(qemb, k_dense)
+        stage_ms["dense"].append((time.perf_counter() - t0) * 1e3)
+        t0 = time.perf_counter()
         b_hits = bm25_r.search(query, k_bm25)
+        stage_ms["bm25"].append((time.perf_counter() - t0) * 1e3)
+        t0 = time.perf_counter()
         s_hits = sparse_r.search(query, k_sparse) if sparse_r is not None else []
+        stage_ms["sparse"].append((time.perf_counter() - t0) * 1e3)
+        t0 = time.perf_counter()
         t_hits = toneless_r.search(query, k_toneless) if toneless_r is not None else []
+        stage_ms["toneless"].append((time.perf_counter() - t0) * 1e3)
 
         d_raw = {pid: s for pid, _, s in d_hits}
         b_raw = {pid: s for pid, _, s in b_hits}
         s_raw = {pid: s for pid, _, s in s_hits}
         t_raw = {pid: s for pid, _, s in t_hits}
 
+        t0 = time.perf_counter()
         features = extract_features(query, bm25_vocab=bm25_vocab, neural_extractor=neural_extractor)
+        stage_ms["features"].append((time.perf_counter() - t0) * 1e3)
         feat_rows.append(features)   # linguistic features only (strata/correlations)
 
         mlp_input = features
         if use_signals:
+            t0 = time.perf_counter()
             signals = extract_retrieval_signals(
                 d_raw, b_raw, s_raw,
                 toneless_scores=t_raw if use_signals_4way else None,
             )
+            stage_ms["signals"].append((time.perf_counter() - t0) * 1e3)
             mlp_input = np.concatenate([features, signals])
 
         # MLP inference + timing
@@ -285,13 +342,24 @@ def run_eval(
         s_norm = _minmax(s_raw)
         t_norm = _minmax(t_raw)
 
+        method_rankings: list[tuple[str, list[str]]] = []
         for method, fixed_w in methods.items():
             if fixed_w == "rrf":
                 ranked = rrf_fuse([d_hits, b_hits, s_hits, t_hits], k_final)
             else:
                 w = w_mlp if fixed_w is None else fixed_w
                 ranked = fuse(d_norm, b_norm, s_norm, t_norm, w, k_final)
+            method_rankings.append((method, ranked))
 
+        if with_oracle:
+            best_w = oracle_best_weights((d_norm, b_norm, s_norm, t_norm), relevant)
+            ranked = (
+                fuse(d_norm, b_norm, s_norm, t_norm, best_w, k_final)
+                if best_w is not None else []
+            )
+            method_rankings.append(("oracle", ranked))
+
+        for method, ranked in method_rankings:
             acc = per_query[method]
             acc["ndcg10"].append(ndcg_at_k(ranked, relevant, 10))
             acc["mrr10"].append(mrr_at_k(ranked, relevant, 10))
@@ -340,6 +408,14 @@ def run_eval(
         "mlp_inference_us": {
             "mean": _r2(np.mean(mlp_us)),
             "std":  _r2(np.std(mlp_us)),
+        },
+        # Per-stage latency breakdown (ms/query). Dense = FAISS search only
+        # (query embedding is an API call, cached in batch runs). "signals"
+        # is the post-retrieval QPP feature block; "features" = underthesea
+        # linguistic features — the dominant router-side cost.
+        "stage_latency_ms": {
+            name: {"mean": _r2(np.mean(vals)), "p50": _r2(np.percentile(vals, 50))}
+            for name, vals in stage_ms.items() if vals
         },
     }
 
@@ -542,6 +618,9 @@ def main() -> None:
     parser.add_argument("--emb-cache",   default=None,
                         help="Path to .npy cache of query embeddings (created on first run; "
                              "later runs on the same qas/subset skip the FPT API entirely).")
+    parser.add_argument("--oracle", action="store_true",
+                        help="Also report the per-query oracle (best grid point, label-"
+                             "dependent) — the routing upper bound for headroom analysis.")
     parser.add_argument("--output",      default=None, help="Save JSON to this path")
     args = parser.parse_args()
 
@@ -628,6 +707,7 @@ def main() -> None:
         toneless_r=toneless_r,
         extra_fixed=extra_fixed,
         query_embeddings=query_embeddings,
+        with_oracle=args.oracle,
     )
 
     # Index file sizes

@@ -193,6 +193,101 @@ def table_ragas() -> None:
         print()
 
 
+ABL_CONFIGS = [
+    ("full", "Full system"),
+    ("argmax", "− expected weights (argmax)"),
+    ("nosignals", "− QPP signals (8 linguistic feats)"),
+    ("normlabels", "− raw labels (per-query min-max)"),
+    ("noaug", "− toneless augmentation"),
+    ("3way", "− toneless channel (3-way routing)"),
+]
+ABL_SETS = [("vq_clean", "ViQuAD clean"), ("vq_noisy", "ViQuAD noisy"),
+            ("dd_clean", "DANGDOCAO clean"), ("dd_noisy", "DANGDOCAO noisy")]
+
+
+def table_ablation() -> None:
+    abl = RESULTS / "ablation"
+    print("\n### Component ablation (router NDCG@10, n=500/set, seed 42)\n")
+    loaded: dict[tuple[str, str], dict] = {}
+    for cfg, _ in ABL_CONFIGS:
+        for tag, _ in ABL_SETS:
+            d = _load(abl / f"{cfg}_{tag}.json")
+            if d:
+                loaded[(cfg, tag)] = d
+    if not loaded:
+        print("_(no ablation result files yet)_")
+        return
+    header = " | ".join(name for _, name in ABL_SETS)
+    print(f"| Configuration | {header} |")
+    print("|" + "---|" * (len(ABL_SETS) + 1))
+    for cfg, label in ABL_CONFIGS:
+        cells = []
+        for tag, _ in ABL_SETS:
+            d = loaded.get((cfg, tag))
+            cells.append(f"{d['methods']['mlp']['NDCG@10']:.4f}" if d else "—")
+        print(f"| {label} | {' | '.join(cells)} |")
+
+    # Oracle headroom (from the "full" runs, which carry the oracle method)
+    rows = []
+    for tag, name in ABL_SETS:
+        d = loaded.get(("full", tag))
+        if not d or "oracle" not in d["methods"]:
+            continue
+        mlp = d["methods"]["mlp"]["NDCG@10"]
+        eq4 = d["methods"].get("fixed_equal_4", {}).get("NDCG@10")
+        orc = d["methods"]["oracle"]["NDCG@10"]
+        if eq4 is None or orc <= eq4:
+            continue
+        rows.append((name, eq4, mlp, orc, (mlp - eq4) / (orc - eq4)))
+    if rows:
+        print("\n**Oracle headroom** (label-dependent per-query best grid point — upper bound):\n")
+        print("| Set | Fixed equal 4-way | Router | Oracle | Headroom realized |")
+        print("|---|---|---|---|---|")
+        for name, eq4, mlp, orc, frac in rows:
+            print(f"| {name} | {eq4:.4f} | {mlp:.4f} | {orc:.4f} | {frac * 100:.0f}% |")
+        print("\n_Headroom realized = (router − equal4) / (oracle − equal4)._")
+
+
+def table_latency() -> None:
+    d = _load(RESULTS / "ablation" / "full_vq_clean.json")
+    lat = (d or {}).get("efficiency", {}).get("stage_latency_ms")
+    if not lat:
+        print("\n### Per-query latency breakdown\n_(no instrumented run yet)_")
+        return
+    print("\n### Per-query latency breakdown (ms, ViQuAD n=500 run)\n")
+    print("| Stage | mean | p50 |")
+    print("|---|---|---|")
+    order = ["dense", "bm25", "sparse", "toneless", "features", "signals"]
+    for name in order:
+        if name in lat:
+            print(f"| {name} | {lat[name]['mean']:.1f} | {lat[name]['p50']:.1f} |")
+    mlp_us = (d or {}).get("efficiency", {}).get("mlp_inference_us", {})
+    if mlp_us:
+        print(f"| router MLP | {mlp_us['mean'] / 1000:.1f} | — |")
+    print("\n_Dense = FAISS search only (query embedding is a cached/batched API call). "
+          "The toneless channel adds one in-memory BM25 lookup; LLM diacritic "
+          "restoration costs ~1.4–1.7 s/query wall-clock (measured over the two "
+          "500-query restoration runs) plus generation-side token spend._")
+
+
+def table_ragas_significance() -> None:
+    sig = _load(RESULTS / "ragas_full" / "significance.json")
+    if not sig:
+        return
+    print("\n**RAGAS paired significance** (router vs baseline, per-sample paired t-test):\n")
+    print("| Condition | vs | metric | Δ | p |")
+    print("|---|---|---|---|---|")
+    names = dict(ABL_SETS)
+    for stem, per_base in sig.items():
+        for base, per_metric in per_base.items():
+            for metric, e in per_metric.items():
+                p = e["ttest_p"]
+                star = ("***" if p < 1e-3 else "**" if p < 1e-2
+                        else "*" if p < 5e-2 else "ns")
+                print(f"| {names.get(stem, stem)} | {base} | {metric} | "
+                      f"{e['mean_delta']:+.4f} | {p:.1e} {star} |")
+
+
 def main() -> None:
     print("# Consolidated evaluation report\n")
     table_retrieval(
@@ -215,7 +310,10 @@ def main() -> None:
     )
     table_curve()
     table_restoration()
+    table_ablation()
+    table_latency()
     table_ragas()
+    table_ragas_significance()
 
 
 if __name__ == "__main__":
