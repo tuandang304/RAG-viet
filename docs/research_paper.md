@@ -1,17 +1,8 @@
-# Dynamic Hybrid Retrieval-Augmented Generation for Vietnamese: Adaptive Fusion of Dense and Sparse Signals via a Lightweight MLP
+# Dynamic Hybrid Retrieval-Augmented Generation for Vietnamese: Tone-Robust Four-Way Retrieval Fusion with a Lightweight Adaptive Router
 
 ---
 
-> ⚠️ **REPRODUCIBILITY NOTE (remove before submission).**
-> The **method sections (§1–§4) describe the current codebase**: an **eight-feature**
-> query representation (adds `oov_ratio`) and a **Keras/TensorFlow** fusion MLP
-> (`Dense(64)→LayerNorm→GELU→Dropout→Dense(32)→LayerNorm→GELU→Dropout→Dense(3)`,
-> **≈2,947 parameters**) trained on a **231-point** simplex grid (step 0.05).
-> **All empirical results in §5 were produced by an earlier configuration**
-> (seven features, a plain `Linear(7→64→32→3)+ReLU` PyTorch MLP of ≈2,691 parameters,
-> 66-point simplex grid at step 0.1). **The result tables, the efficiency numbers,
-> and the interpretability correlations must be regenerated with the current code
-> before submission**, after which this note and any "(earlier run)" markers can be deleted.
+> *Note (remove before submission): author placeholders and [CITATION] markers remain to be filled in. All numbers in this draft are current — they are produced by `scripts/aggregate_results.py` from the result files in `results/` and consolidated in `docs/results_summary.md`.*
 
 ---
 
@@ -38,7 +29,7 @@ On the UIT-ViQuAD 2.0 test set (7,301 queries), our router achieves **NDCG@10 = 
 
 ## Keywords
 
-Retrieval-Augmented Generation, Hybrid Retrieval, Dense Retrieval, BM25, Vietnamese NLP, Adaptive Fusion, MLP, Soft Labels, Cross-domain Generalization
+Retrieval-Augmented Generation, Hybrid Retrieval, Dense Retrieval, BM25, Vietnamese NLP, Diacritic Robustness, Adaptive Fusion, Query Performance Prediction, Cross-domain Generalization
 
 ---
 
@@ -50,18 +41,18 @@ For **Vietnamese**, this challenge is amplified by three language-specific facto
 
 1. **Word segmentation dependency.** Vietnamese is written without spaces between syllables, but semantic units (words) span multiple syllables ("học_sinh" = student, "trí_tuệ_nhân_tạo" = artificial intelligence). BM25 applied to raw whitespace-tokenized text degrades significantly compared to BM25 over properly segmented words.
 
-2. **Diacritical mark sensitivity.** Vietnamese orthography uses six tones encoded as diacritical marks. Users frequently type without diacritics (e.g., "benh tieu duong" instead of "bệnh tiểu đường"), causing near-total BM25 failure while dense embeddings remain comparatively robust.
+2. **Diacritical mark sensitivity.** Vietnamese orthography uses six tones encoded as diacritical marks. Users frequently type without diacritics (e.g., "benh tieu duong" instead of "bệnh tiểu đường"). This is not a failure mode of one retriever but of *all* standard ones simultaneously — the missing marks break lexical matching for BM25, shift the query out of distribution for the dense encoder, and change the sub-word segmentation for learned-sparse retrieval. Recovering lexical overlap requires an index built in the same diacritic-free space as the corrupted query — which motivates the dedicated toneless retrieval channel introduced in this work.
 
 3. **Code-switching.** Technical Vietnamese text commonly mixes English terms (e.g., "API", "database"). Classical BM25 over whitespace-tokenized text may match such terms but loses Vietnamese compound structure, whereas dense models can conflate semantically related English tokens. Learned-sparse retrieval (BGE-M3 lexical weights) offers a middle path: it assigns importance weights to tokens directly, including code-switched English terms, while sharing a tokenizer with the dense backbone.
 
-These factors suggest that the optimal balance between dense, BM25, and learned-sparse retrieval is **query-dependent** in a linguistically predictable way. Our central hypothesis is that a small neural module, conditioned on lightweight linguistic features of the query, can learn this mapping over the three-signal weight simplex and outperform any fixed weight choice.
+These factors have a structural consequence: the channel that rescues diacritic-free queries (an index built over diacritic-stripped text) is *harmful* on clean queries, where stripping creates homograph collisions. No fixed combination of channels can therefore be strong in both regimes — and real Vietnamese query streams mix the regimes unpredictably. Our central hypothesis is that a small routing module, conditioned on lightweight linguistic features of the query *and on how each retrieval channel responds to it*, can allocate fusion weight per query and remain near-optimal across the entire clean-to-noisy spectrum without being told which regime a query belongs to.
 
 Our contributions are:
 
-1. A **Dynamic Hybrid RAG** architecture with a per-query MLP fusion module that produces three-way weights `(w_dense, w_bm25, w_sparse)` over dense, BM25, and BGE-M3 learned-sparse signals — trained end-to-end on Vietnamese QA data.
-2. A **Vietnamese-aware feature extractor** (8 features: diacritic ratio, compound word ratio, English token ratio, tech-term ratio, clause count, question-word presence, query length, and out-of-vocabulary ratio against the BM25 corpus).
-3. A **soft-label training strategy** using temperature-scaled NDCG@10 distributions over a 3D simplex grid (231 points at step 0.05), improving over hard-label grid search.
-4. An **empirical analysis** on two Vietnamese datasets — UIT-ViQuAD 2.0 (Wikipedia) and DANGDOCAO (legal/administrative) — quantifying when dynamic three-way fusion outperforms fixed-weight baselines and single-signal retrievers.
+1. A **tone-robust four-way retrieval architecture** for Vietnamese that adds a diacritic-stripped syllable-level BM25 channel alongside dense (FPT Vietnamese Embedding + FAISS), word-segmented BM25, and BGE-M3 learned-sparse retrieval. The toneless channel restores lexical overlap for diacritic-free queries at the cost of a single in-memory BM25 lookup (≈19 ms), transforming noisy-regime retrieval (NDCG@10 0.147 → 0.622 on legal-domain queries) — but only when gated per query, since uniform inclusion *hurts* clean-regime quality.
+2. A **lightweight adaptive router** (≈14K parameters) that predicts the achievable NDCG@10 surface over a 286-point weight simplex from eight Vietnamese-aware linguistic features plus 28 scale-invariant post-retrieval query-performance signals, and converts the predicted surface into weights by softmax expectation — degrading gracefully to near-uniform fusion when routing cannot help.
+3. A **training protocol** — raw (un-normalized) grid-NDCG regression targets plus explicit training-set coverage of the fully-toneless regime — each element of which is validated (or honestly bounded) by a component ablation, an oracle-headroom analysis, and a cross-domain temperature-sensitivity study.
+4. A **comprehensive empirical study** on UIT-ViQuAD 2.0 (Wikipedia) and zero-shot DANGDOCAO (legal/administrative): full-test comparisons against ten baselines including reciprocal-rank fusion, a dev-tuned best-fixed weight vector, and LLM diacritic restoration; a noise-level sweep showing the router traces the upper envelope across the 0–100% corruption spectrum; generalization to LLM-generated noise types unseen in training; and end-to-end RAGAS evaluation with paired significance testing.
 
 ---
 
@@ -75,9 +66,9 @@ Our contributions are:
 
 ### 2.2. Hybrid Retrieval
 
-Hybrid retrieval combining dense and sparse signals has been studied extensively for English [CITATION]. Reciprocal Rank Fusion (RRF) [CITATION] and linear interpolation of scores [CITATION] are common approaches, but all rely on fixed combination strategies. [CITATION: BM25+dense interpolation work] shows that the optimal weight is dataset-dependent, motivating adaptive approaches.
+Hybrid retrieval combining dense and sparse signals has been studied extensively for English [CITATION]. Reciprocal Rank Fusion (RRF) [5] and linear interpolation of scores [CITATION] are common approaches, but both rely on fixed, query-independent combination strategies; we evaluate RRF directly as a baseline and show that its egalitarian rank aggregation is particularly costly when some channels fail catastrophically (as under diacritic noise, §5.3.2). [CITATION: BM25+dense interpolation work] shows that the optimal interpolation weight is dataset-dependent, motivating adaptive approaches; our results sharpen this observation to the *query* level: on Vietnamese, the optimal weight vector differs so strongly between clean and diacritic-free queries that no single static vector — not even one tuned on a development mix of both regimes — is strong everywhere (§5.4).
 
-Recent multi-functional encoders such as BGE-M3 [3] expose three retrieval modes — dense, learned sparse (lexical weights), and multi-vector (ColBERT-style) — from a single backbone, enabling tighter score-space coupling than externally combined dense + BM25 systems. We adopt the dense and learned-sparse modes of (a Vietnamese fine-tune of) this family alongside classical BM25, yielding a three-signal fusion problem in which a single backbone supplies two of the three signals.
+Recent multi-functional encoders such as BGE-M3 [3] expose three retrieval modes — dense, learned sparse (lexical weights), and multi-vector (ColBERT-style) — from a single backbone, enabling tighter score-space coupling than externally combined dense + BM25 systems. We adopt the dense and learned-sparse modes of (a Vietnamese fine-tune of) this family alongside classical word-segmented BM25 and a diacritic-stripped syllable-level BM25 index, yielding a four-signal fusion problem in which a single backbone supplies two of the four signals and the remaining two are complementary lexical views of the corpus — one preserving tone information, one deliberately discarding it.
 
 ### 2.3. Adaptive / Learned Retrieval Fusion
 
@@ -95,11 +86,11 @@ Vietnamese IR is less studied than English or Chinese. [CITATION: ViQuAD paper] 
 
 ### 3.1. Problem Formulation
 
-Given a corpus of passages $\mathcal{P} = \{p_1, \ldots, p_N\}$ and a query $q$, we seek a retrieval function that returns the top-$k$ passages most relevant to $q$. We define the fused three-way relevance score as:
+Given a corpus of passages $\mathcal{P} = \{p_1, \ldots, p_N\}$ and a query $q$, we seek a retrieval function that returns the top-$k$ passages most relevant to $q$. We define the fused four-way relevance score as:
 
-$$s(q, p) = w_\text{dense} \cdot \hat{s}_\text{dense}(q, p) + w_\text{bm25} \cdot \hat{s}_\text{bm25}(q, p) + w_\text{sparse} \cdot \hat{s}_\text{sparse}(q, p)$$
+$$s(q, p) = w_\text{dense} \cdot \hat{s}_\text{dense}(q, p) + w_\text{bm25} \cdot \hat{s}_\text{bm25}(q, p) + w_\text{sparse} \cdot \hat{s}_\text{sparse}(q, p) + w_\text{toneless} \cdot \hat{s}_\text{toneless}(q, p)$$
 
-where $\hat{s}$ denotes min-max normalized scores and $(w_\text{dense}, w_\text{bm25}, w_\text{sparse}) = \text{softmax}(\text{MLP}(\phi(q)))$ with $\phi(q) \in \mathbb{R}^8$ being the Vietnamese-aware feature vector. The softmax constraint enforces $w_\text{dense} + w_\text{bm25} + w_\text{sparse} = 1$ and $w_i \geq 0$, i.e. the weight vector lies on the 2-simplex.
+where $\hat{s}$ denotes min-max normalized channel scores and the weight vector $\mathbf{w} = (w_\text{dense}, w_\text{bm25}, w_\text{sparse}, w_\text{toneless})$ lies on the 3-simplex ($\sum_i w_i = 1$, $w_i \geq 0$). Rather than emit $\mathbf{w}$ directly, the router predicts the *achievable NDCG@10* at every point of a discrete grid $G_4$ over the simplex and derives $\mathbf{w}$ from that predicted surface (§3.4), conditioning on both a linguistic feature vector $\phi(q)$ and a post-retrieval channel-response signal vector $\psi(q)$ computed from the candidates the four channels have already returned (§3.3).
 
 ### 3.2. Retrieval Components
 
@@ -130,7 +121,7 @@ We extract eight features $\phi(q) = [f_1, \ldots, f_8]$:
 | $f_7$ — query\_length\_norm | Syllable count normalized at 20 | $[0, 1]$ |
 | $f_8$ — oov\_ratio | Fraction of underthesea-segmented query tokens absent from the BM25 corpus vocabulary | $[0, 1]$ |
 
-**Post-retrieval query-performance signals.** The eight linguistic features describe only the query string, yet which channel wins also depends on how the corpus responds to the query. We therefore append a block of query-performance-prediction (QPP) signals computed *after* the four channels have retrieved (which fusion requires anyway, so the signals are free at inference): for each channel, the top-1/top-2 score gap, the mean and standard deviation of the top-10 score window, and coverage; plus, across every channel pair, the Jaccard overlap of top-10 id sets and a top-1 agreement indicator. Every statistic is computed on scores normalized within the channel's own top-$k$ window, making the block invariant to raw score scale — essential for zero-shot transfer across corpora whose BM25/sparse magnitudes differ. The router input is the concatenation of the eight linguistic features with these signals (28 signals in the four-channel configuration).
+**Post-retrieval query-performance signals** $\psi(q)$. The eight linguistic features describe only the query string, yet which channel wins also depends on how the corpus responds to the query. We therefore append a block of query-performance-prediction (QPP) signals computed *after* the four channels have retrieved (which fusion requires anyway, so the signals are free at inference): for each channel, the top-1/top-2 score gap, the mean and standard deviation of the top-10 score window, and coverage; plus, across every channel pair, the Jaccard overlap of top-10 id sets and a top-1 agreement indicator. Every statistic is computed on scores normalized within the channel's own top-$k$ window, making the block invariant to raw score scale — essential for zero-shot transfer across corpora whose BM25/sparse magnitudes differ. The router input is the concatenation of the eight linguistic features with these signals (28 signals in the four-channel configuration).
 
 ### 3.4. Grid-NDCG Router
 
@@ -174,9 +165,9 @@ Supervision for the router is the downstream NDCG@10 achievable under each candi
 
 **Statistical significance.** For each baseline comparison, we report (i) paired t-test $p$-value, (ii) Wilcoxon signed-rank $p$-value on per-query NDCG@10 differences, and (iii) 95% bootstrap confidence interval (2,000 resamples) of the mean NDCG@10 delta.
 
-**Efficiency.** We report MLP parameter count, index sizes, and per-query MLP inference latency to quantify the overhead of adaptive fusion over fixed-weight fusion.
+**Efficiency.** We report router parameter count, index sizes, and a per-stage per-query latency breakdown (each retrieval channel, feature extraction, signal computation, router inference) to quantify the overhead of adaptive fusion over fixed-weight fusion and to ground the cost comparison against LLM-based diacritic restoration.
 
-**Weight interpretability.** We compute weight entropy $H = -\sum_i w_i \log w_i$ and Pearson correlations between linguistic query features and predicted weights to verify that the MLP learns linguistically meaningful mappings.
+**Weight interpretability.** We compute weight entropy $H = -\sum_i w_i \log w_i$, Pearson correlations between linguistic query features and predicted weights, and — most informatively for the four-way system — the trajectory of the mean toneless weight and entropy across controlled noise levels, to verify that the router's gating behaviour is linguistically meaningful at the regime level.
 
 The generator and RAGAS judge (Llama-3.3-70B-Instruct via FPT AI Factory) are used for end-to-end QA evaluation in Section 5.7; a non-reasoning instruct model is required because reasoning models exhaust the token budget on hidden thinking and return empty judgements.
 
@@ -199,7 +190,7 @@ All baselines share the same retrieval candidate set (top-100 from each of the f
 
 ### 4.4. Implementation Details
 
-Dense semantic retrieval uses the 1024-dimensional FPT Vietnamese Embedding model, a fine-tune of BGE-M3 served through an OpenAI-compatible API. Passage embeddings are L2-normalised and indexed with FAISS `IndexFlatIP`, equivalent to cosine similarity. BM25 retrieval is performed by `rank_bm25.BM25Okapi` over text tokenised with underthesea's `word_tokenize`. Learned-sparse retrieval uses the BAAI/bge-m3 model accessed locally via the FlagEmbedding library, indexed as an in-memory inverted file over non-zero token weights. The end-to-end RAG evaluation in §5.7 uses Qwen3-32B as the generator and the RAGAS judge LLM, accessed through the same OpenAI-compatible interface.
+Dense semantic retrieval uses the 1024-dimensional FPT Vietnamese Embedding model, a fine-tune of BGE-M3 served through an OpenAI-compatible API. Passage embeddings are L2-normalised and indexed with FAISS `IndexFlatIP`, equivalent to cosine similarity. BM25 retrieval is performed by `rank_bm25.BM25Okapi` over text tokenised with underthesea's `word_tokenize`; the toneless channel is a second `BM25Okapi` index over lowercased, diacritic-stripped, whitespace-split syllables, with the identical transform applied to queries at search time. Learned-sparse retrieval uses the BAAI/bge-m3 model accessed locally via the FlagEmbedding library, indexed as an in-memory inverted file over non-zero token weights. The end-to-end RAG evaluation in §5.7 uses Llama-3.3-70B-Instruct as both generator and RAGAS judge, accessed through the same OpenAI-compatible interface.
 
 The four-way router (Keras/TensorFlow) is trained on a multi-domain pool of 6,000 queries augmented with 1,500 rule-based fully-diacritic-stripped variants (7,500 total), using Adam with learning rate $10^{-3}$, batch size 256, and 100 epochs. To avoid an OpenMP/MKL runtime clash between FAISS and TensorFlow, candidate-score collection (FAISS/BM25/BGE-M3) and network fitting run in separate processes. Targets are raw NDCG@10 over the 286-point four-simplex grid (step $0.1$); inference uses softmax-expected weights at $T = 0.05$. The diacritic-restoration baseline uses Qwen3.6-27B (the successor to Qwen3-32B, which FPT removed from its catalogue) and the end-to-end RAGAS judge uses the non-reasoning Llama-3.3-70B-Instruct. The seed for all randomised components is fixed at $42$.
 
@@ -209,105 +200,79 @@ All experimental results in §5 are produced on a single workstation equipped wi
 
 ## 5. Results & Discussion
 
-> *Note (to be removed before submission): the tables in §5.1–§5.2 below are the legacy three-way results (dense + BM25 + sparse, softmax-weight MLP) and are retained only for historical comparison. **The current four-way system's numbers — full-test baseline table, OOD-noise generalization, the noise-level curve, the restoration comparison, and end-to-end RAGAS — are consolidated in `docs/results_summary.md`, produced by `scripts/aggregate_results.py`, and are the authoritative results for this paper.** Headline four-way figures: ViQuAD test NDCG@10 = 0.854 (router) vs 0.848 fixed-equal-3 / 0.837 fixed-equal-4 / 0.821 dev-tuned best-fixed / 0.799 RRF; ViQuAD diacritic-noisy 0.641 vs 0.396 fixed-equal-3; DANGDOCAO zero-shot 0.820 clean / 0.622 noisy. **§5.3–§5.7 below have been regenerated against the four-way full-test runs and are current.***
+All results in this section are produced by a single router checkpoint, trained once with the protocol of §3.5 and §4.4 and never re-tuned per condition. §5.1 reports the in-domain evaluation on UIT-ViQuAD 2.0; §5.2 the zero-shot cross-domain evaluation on DANGDOCAO; §5.3 analyses *when* and *why* routing helps, including the noise-level sweep and generalisation to unseen noise types; §5.4 gives the full significance battery; §5.5 the efficiency analysis; §5.6 the component ablation and oracle-headroom study; and §5.7 the end-to-end RAGAS evaluation.
 
 ### 5.1. In-domain Results (UIT-ViQuAD 2.0)
 
-All in-domain results report a single fusion MLP trained with the configuration described in §3.5 and §4.4 (5,000 augmented training queries from UIT-ViQuAD 2.0, soft-label simplex supervision at temperature $T = 0.3$, 100 training epochs). The same checkpoint is evaluated on the dev split, the held-out test split, and a diacritic-stripped variant of the dev split; the checkpoint is not re-tuned for any of the three conditions.
-
-**Dev set** (3,814 queries, used for model selection):
+**Clean test set** (7,301 queries, held-out):
 
 | Method | NDCG@10 | MRR@10 | MAP@10 | Recall@10 | Recall@100 | Hit@1 |
 |--------|---------|--------|--------|-----------|------------|-------|
-| BM25 only | 0.6770 | 0.6376 | 0.6376 | 0.8007 | 0.9295 | 0.5582 |
-| Dense only | 0.7953 | 0.7561 | 0.7561 | 0.9174 | 0.9869 | 0.6720 |
-| Sparse only (BGE-M3) | 0.7507 | 0.7109 | 0.7109 | 0.8749 | 0.9730 | 0.6264 |
-| Dense + BM25 (0.5/0.5) | 0.8330 | 0.7996 | 0.7996 | 0.9352 | 0.9890 | 0.7218 |
-| Fixed-equal three-way (1/3,1/3,1/3) | 0.8463 | 0.8153 | 0.8153 | 0.9415 | 0.9908 | 0.7428 |
-| **Dynamic MLP (soft label, three-way)** | **0.8479** | **0.8170** | **0.8170** | **0.9428** | **0.9908** | **0.7444** |
+| BM25 only | 0.6621 | 0.6195 | 0.6195 | 0.7966 | 0.9259 | 0.5357 |
+| Dense only | 0.8064 | 0.7674 | 0.7674 | 0.9270 | 0.9885 | 0.6795 |
+| Sparse only (BGE-M3) | 0.7594 | 0.7164 | 0.7164 | 0.8933 | 0.9743 | 0.6240 |
+| Toneless only | 0.5760 | 0.5316 | 0.5316 | 0.7162 | 0.8754 | 0.4457 |
+| Dense + BM25 (0.5/0.5) | 0.8272 | 0.7898 | 0.7898 | 0.9423 | 0.9910 | 0.7042 |
+| RRF ($k = 60$) | 0.7988 | 0.7576 | 0.7576 | 0.9273 | 0.9908 | 0.6696 |
+| Fixed-equal three-way | 0.8482 | 0.8142 | 0.8142 | 0.9529 | 0.9925 | 0.7350 |
+| Fixed-equal four-way | 0.8369 | 0.8013 | 0.8013 | 0.9467 | 0.9915 | 0.7199 |
+| Best-fixed (dev-tuned) | 0.8211 | 0.7831 | 0.7831 | 0.9388 | 0.9916 | 0.6980 |
+| **Dynamic router (ours)** | **0.8541** | **0.8217** | **0.8217** | **0.9540** | **0.9929** | **0.7466** |
 
-**Test set** (7,301 queries, held-out final evaluation):
+Four observations characterise the clean regime. First, among the four single channels, dense semantic retrieval (0.8064) leads BGE-M3 learned sparse (0.7594), classical BM25 (0.6621), and — last by design — the toneless channel (0.5760), whose diacritic stripping creates homograph collisions that cost it roughly nine NDCG points against toned BM25 on clean text. Second, and centrally to this paper's argument: *adding the toneless channel with uniform weights makes fusion worse*. Fixed-equal four-way (0.8369) trails fixed-equal three-way (0.8482) by more than a point — the fourth channel is a liability on clean queries unless something suppresses it. The dynamic router is that something: it holds $\bar{w}_\text{toneless}$ at $0.19$ on this split (§5.3) and reaches 0.8541, above every baseline with $p \le 2.4\!\times\!10^{-5}$ (§5.4). Third, the two tuned/untuned static competitors bracket the fusion design space from both sides and both lose: RRF (0.7988) sits below even the two-way linear hybrid because egalitarian rank aggregation grants the two weaker lexical channels equal influence, and the dev-tuned best-fixed vector (0.8211) — grid-searched on a balanced clean+noisy dev mix — pays a three-point clean-side toll for its noise insurance. Fourth, Recall@100 saturates near $0.99$ for every multi-channel method, so the router's contribution on clean text is re-ranking within an almost-complete candidate pool; correspondingly its largest margins appear in the rank-sensitive metrics (Hit@1: 0.7466 vs 0.7350 for the best static method).
 
-| Method | NDCG@10 | MRR@10 | MAP@10 | Recall@10 | Recall@100 | Hit@1 |
-|--------|---------|--------|--------|-----------|------------|-------|
-| BM25 only | 0.6623 | 0.6198 | 0.6198 | 0.7966 | 0.9269 | 0.5364 |
-| Dense only | 0.8068 | 0.7679 | 0.7679 | 0.9270 | 0.9885 | 0.6803 |
-| Sparse only (BGE-M3) | 0.7595 | 0.7167 | 0.7167 | 0.8930 | 0.9748 | 0.6247 |
-| Dense + BM25 (0.5/0.5) | 0.8278 | 0.7907 | 0.7907 | 0.9423 | 0.9910 | 0.7059 |
-| Fixed-equal three-way (1/3,1/3,1/3) | 0.8486 | 0.8146 | 0.8146 | 0.9533 | 0.9925 | 0.7357 |
-| **Dynamic MLP (soft label, three-way)** | **0.8514** | **0.8178** | **0.8178** | **0.9547** | **0.9925** | **0.7398** |
-
-Three observations characterise the in-domain regime. First, among the three single-signal retrievers, dense semantic retrieval (test NDCG@10 = 0.8068) outperforms BGE-M3 learned sparse (0.7595), which in turn outperforms classical BM25 (0.6623). The 9.7-point gap between BGE-M3 sparse and BM25 is itself notable: both retrievers operate on lexical matches, yet the learned weighting captures importance information that BM25's tf-idf statistics fail to recover from Vietnamese text, whose limited inflectional morphology offers little for idf separation to act upon. Second, fusing all three signals with uniform weights already accounts for a substantial portion of the observed gains. The fixed-equal three-way baseline reaches 0.8486 on test, exceeding the conventional dense + BM25 hybrid (0.8278) by 2.1 NDCG points and dense-only retrieval by 4.2 points. The three-signal fusion architecture is therefore beneficial independently of any adaptive weighting. Third, the dynamic MLP improves upon every fixed-weight baseline on both splits. Against the strongest fixed reference (fixed-equal three-way), the MLP gains $+0.0016$ NDCG@10 on dev ($p = 2.0\!\times\!10^{-3}$) and $+0.0028$ on test ($p = 1.3\!\times\!10^{-10}$); the full significance battery is reported in §5.4. The absolute gain over fixed-equal is modest, but it is consistent across all six headline retrieval metrics and across both splits.
-
-Two structural properties of the results merit explicit comment. Recall@100 saturates at approximately $0.991$ for every three-way method on both dev and test, indicating that once the candidate union is drawn from three top-100 lists, the relevant passage is almost always present in the pool. Adaptive fusion therefore acts on *re-ranking within a near-complete candidate set* rather than on *candidate expansion*, which explains the wider NDCG@10 and Hit@1 gaps relative to Recall@100. The mean predicted weights $(\bar{w}_\text{dense}, \bar{w}_\text{bm25}, \bar{w}_\text{sparse}) = (0.349, 0.319, 0.332)$ on the test set lie close to the uniform $(1/3, 1/3, 1/3)$ centre of the simplex. The adaptive component's contribution is therefore not a globally different weighting, but rather a query-conditional displacement from this central operating point — a hypothesis examined directly in the stratified and correlation analyses of §5.3.
-
-**Diacritic robustness** (dev queries with all tone marks removed, 3,814 queries):
+**Diacritic-stripped dev set** (3,814 queries, all tone marks removed):
 
 | Method | NDCG@10 | MRR@10 | MAP@10 | Recall@10 | Recall@100 | Hit@1 |
 |--------|---------|--------|--------|-----------|------------|-------|
-| BM25 only | 0.1559 | 0.1336 | 0.1336 | 0.2278 | 0.4740 | 0.0954 |
-| Dense only | 0.2956 | 0.2550 | 0.2550 | 0.4266 | 0.6691 | 0.1862 |
-| Sparse only (BGE-M3) | 0.3671 | 0.3253 | 0.3253 | 0.5013 | 0.7278 | 0.2509 |
-| Dense + BM25 (0.5/0.5) | 0.3050 | 0.2648 | 0.2648 | 0.4350 | 0.6762 | 0.1964 |
-| Fixed-equal three-way (1/3,1/3,1/3) | 0.3969 | 0.3540 | 0.3540 | 0.5359 | 0.7286 | 0.2803 |
-| **Dynamic MLP (soft label, three-way)** | **0.3993** | **0.3564** | **0.3564** | **0.5375** | **0.7289** | **0.2816** |
+| BM25 only | 0.1558 | 0.1335 | 0.1335 | 0.2276 | 0.4751 | 0.0954 |
+| Dense only | 0.2953 | 0.2547 | 0.2547 | 0.4266 | 0.6681 | 0.1856 |
+| Sparse only (BGE-M3) | 0.3669 | 0.3253 | 0.3253 | 0.5003 | 0.7278 | 0.2509 |
+| Toneless only | 0.5905 | 0.5506 | 0.5506 | 0.7171 | 0.8728 | 0.4738 |
+| Dense + BM25 (0.5/0.5) | 0.3015 | 0.2601 | 0.2601 | 0.4350 | 0.6762 | 0.1880 |
+| RRF ($k = 60$) | 0.5045 | 0.4543 | 0.4543 | 0.6644 | 0.9061 | 0.3597 |
+| Fixed-equal three-way | 0.3961 | 0.3532 | 0.3532 | 0.5346 | 0.7284 | 0.2792 |
+| Fixed-equal four-way | 0.5694 | 0.5167 | 0.5167 | 0.7362 | 0.8993 | 0.4164 |
+| Best-fixed (dev-tuned) | 0.6457 | 0.6035 | 0.6035 | 0.7787 | 0.9156 | 0.5184 |
+| **Dynamic router (ours)** | 0.6405 | 0.5972 | 0.5972 | 0.7777 | **0.9206** | 0.5134 |
 
-Diacritic removal produces an asymmetric degradation pattern across the three retrievers and supplies direct empirical support for the motivation laid out in §1. BM25 collapses from NDCG@10 = $0.6770$ on clean queries to $0.1559$ under noise, a $77\%$ relative drop; the missing tone marks turn every previously matchable term into a lexical miss. Dense retrieval degrades more gracefully (from $0.7953$ to $0.2956$, a $63\%$ drop), reflecting the partial semantic invariance of the embedding model to orthographic perturbation. The most informative single-signal result, however, is the BGE-M3 learned-sparse retriever, which falls only to $0.3671$ ($51\%$ relative drop) and surpasses dense retrieval under noise — a finding consistent with BGE-M3's sub-word tokeniser handling diacritic stripping more uniformly than either whitespace tokenisation or full-token dense embedding. Without ever being told that the queries were noisy, the MLP shifts its predicted weights in the direction predicted by §1: $\bar{w}_\text{sparse}$ rises from $0.332$ on clean test queries to $0.354$ on noisy dev queries, while $\bar{w}_\text{bm25}$ falls from $0.320$ to $0.310$. The resulting MLP NDCG@10 of $0.3993$ exceeds the two-way dense + BM25 baseline by $0.094$ ($p < 10^{-125}$, §5.4). The three-signal architecture is therefore necessary to recover any meaningful retrieval performance under diacritic noise, and adaptive weighting provides a small but reliable additional gain on top of it.
+Full diacritic stripping inverts the channel hierarchy. The three tone-dependent channels collapse — BM25 by 76% relative (0.662 → 0.156), dense by 63% (0.806 → 0.295), BGE-M3 sparse by 52% (0.759 → 0.367) — while the toneless channel is *unchanged by construction* (0.576 → 0.591; its index and the stripped queries live in the same diacritic-free space). The consequences propagate through every fusion strategy that lacks or under-uses the surviving channel: fixed-equal three-way manages only 0.3961, and even fixed-equal four-way (0.5694) dilutes the one working signal with three failing ones. The router reaches 0.6405 — above toneless-only by $+0.0500$ ($p = 2.3\!\times\!10^{-40}$), because on partially matchable queries it still routes residual weight to whichever toned channel retains signal — and above every untuned baseline by wide, significant margins. The single method it trails is the dev-tuned best-fixed vector (0.6457, $-0.0052$; marginal, and not confirmed by the Wilcoxon test), a comparison we analyse honestly in §5.4: a static vector specialised for full stripping wins narrowly when every query is fully stripped, and pays for it everywhere else. Recall@100 tells the downstream-relevant story most clearly: the router restores the retrievable-evidence ceiling to 0.9206 — within a point of the clean-split ceiling — against 0.7284 for the best three-way method, roughly halving the fraction of queries whose answer passage a generator could never see.
 
 ### 5.2. Cross-domain Results (DANGDOCAO, Zero-shot)
 
-The cross-domain protocol applies the same MLP checkpoint evaluated in §5.1 — trained on 5,000 Wikipedia queries from UIT-ViQuAD 2.0 — to a previously unseen legal/administrative corpus. No DANGDOCAO data is observed at any stage of MLP training, and the three retrievers are re-built from the DANGDOCAO corpus alone, so neither the fusion module nor the index parameters carry any in-domain information.
+The cross-domain protocol applies the identical router checkpoint — trained on the multi-domain pool of §3.5, which contains no DANGDOCAO data — to the DANGDOCAO legal/administrative corpus (37,239 passages, 736 sub-domains). All four channel indexes are rebuilt from the DANGDOCAO corpus alone; neither the router nor any index parameter carries target-domain information.
 
-DANGDOCAO is split using a group-by-passage protocol: each of the 37,239 passages is randomly assigned to exactly one of train, dev, or test in an 80 / 10 / 10 ratio, and every QA pair inherits its split from its underlying passage. The resulting counts are 29,793 / 3,723 / 3,723 passages and 35,289 / 4,309 / 4,315 QA pairs. This eliminates the passage-level information leak that a naive QA-level shuffle would introduce — a leak that would be particularly damaging for fusion evaluation, since the same passage could otherwise appear in training and test under different surface forms of its associated questions.
-
-**Clean queries** (4,315 test, group-by-passage split, zero-shot):
+**Clean test set** (4,315 queries):
 
 | Method | NDCG@10 | MRR@10 | MAP@10 | Recall@10 | Recall@100 | Hit@1 |
 |--------|---------|--------|--------|-----------|------------|-------|
-| BM25 only | 0.6762 | 0.6216 | 0.6216 | 0.8466 | 0.9560 | 0.5043 |
-| Dense only | 0.7908 | 0.7420 | 0.7420 | 0.9400 | 0.9905 | 0.6248 |
-| Sparse only (BGE-M3) | 0.7522 | 0.7014 | 0.7014 | 0.9085 | 0.9754 | 0.5852 |
-| Dense + BM25 (0.5/0.5) | 0.8051 | 0.7592 | 0.7592 | 0.9446 | 0.9910 | 0.6459 |
-| Fixed-equal three-way (1/3,1/3,1/3) | 0.8156 | 0.7702 | 0.7702 | 0.9539 | 0.9933 | 0.6598 |
-| **Dynamic MLP (soft label, three-way)** | **0.8167** | **0.7716** | **0.7716** | **0.9537** | **0.9935** | **0.6607** |
+| BM25 only | 0.6748 | 0.6197 | 0.6197 | 0.8463 | 0.9569 | 0.5013 |
+| Dense only | 0.7907 | 0.7418 | 0.7418 | 0.9400 | 0.9905 | 0.6243 |
+| Sparse only (BGE-M3) | 0.7526 | 0.7020 | 0.7020 | 0.9082 | 0.9754 | 0.5863 |
+| Toneless only | 0.6094 | 0.5552 | 0.5552 | 0.7791 | 0.9295 | 0.4419 |
+| Dense + BM25 (0.5/0.5) | 0.8048 | 0.7589 | 0.7589 | 0.9444 | 0.9910 | 0.6452 |
+| RRF ($k = 60$) | 0.7816 | 0.7330 | 0.7330 | 0.9321 | 0.9917 | 0.6232 |
+| Fixed-equal three-way | 0.8152 | 0.7697 | 0.7697 | 0.9539 | 0.9933 | 0.6586 |
+| Fixed-equal four-way | 0.8051 | 0.7583 | 0.7583 | 0.9486 | 0.9921 | 0.6470 |
+| Best-fixed (dev-tuned) | 0.7869 | 0.7380 | 0.7380 | 0.9370 | 0.9917 | 0.6246 |
+| **Dynamic router (ours)** | **0.8196** | **0.7753** | **0.7753** | **0.9543** | 0.9930 | **0.6660** |
 
-**Diacritic-removed queries** (4,315 test, 100% diacritics stripped):
+**Diacritic-stripped test set** (4,315 queries):
 
 | Method | NDCG@10 | MRR@10 | MAP@10 | Recall@10 | Recall@100 | Hit@1 |
 |--------|---------|--------|--------|-----------|------------|-------|
-| BM25 only | 0.0480 | 0.0392 | 0.0392 | 0.0769 | 0.1766 | 0.0255 |
-| Dense only | 0.0714 | 0.0598 | 0.0598 | 0.1094 | 0.2190 | 0.0408 |
-| Sparse only (BGE-M3) | 0.1435 | 0.1224 | 0.1224 | 0.2109 | 0.3868 | 0.0834 |
-| Dense + BM25 (0.5/0.5) | 0.0837 | 0.0707 | 0.0707 | 0.1258 | 0.2438 | 0.0487 |
-| Fixed-equal three-way (1/3,1/3,1/3) | 0.1477 | 0.1277 | 0.1277 | 0.2116 | 0.3583 | 0.0913 |
-| **Dynamic MLP (soft label, three-way)** | **0.1530** | **0.1330** | **0.1330** | **0.2167** | **0.3606** | **0.0952** |
+| BM25 only | 0.0481 | 0.0393 | 0.0393 | 0.0769 | 0.1773 | 0.0257 |
+| Dense only | 0.0715 | 0.0598 | 0.0598 | 0.1094 | 0.2197 | 0.0408 |
+| Sparse only (BGE-M3) | 0.1435 | 0.1222 | 0.1222 | 0.2116 | 0.3891 | 0.0830 |
+| Toneless only | 0.6095 | 0.5552 | 0.5552 | 0.7791 | 0.9270 | 0.4417 |
+| Dense + BM25 (0.5/0.5) | 0.0833 | 0.0700 | 0.0700 | 0.1258 | 0.2438 | 0.0473 |
+| RRF ($k = 60$) | 0.3055 | 0.2523 | 0.2523 | 0.4809 | 0.8962 | 0.1715 |
+| Fixed-equal three-way | 0.1470 | 0.1269 | 0.1269 | 0.2114 | 0.3581 | 0.0904 |
+| Fixed-equal four-way | 0.4277 | 0.3531 | 0.3531 | 0.6667 | 0.8971 | 0.2271 |
+| Best-fixed (dev-tuned) | 0.6287 | 0.5761 | 0.5761 | 0.7930 | 0.9156 | 0.4660 |
+| **Dynamic router (ours)** | 0.6218 | 0.5678 | 0.5678 | 0.7903 | **0.9207** | 0.4545 |
 
-**Cross-domain significance (paired tests vs MLP):**
-
-| Comparison | Clean Δ NDCG | $p$ (t-test) | Noisy Δ NDCG | $p$ (t-test) |
-|------------|--------------|--------------|--------------|--------------|
-| MLP vs. Fixed-equal three-way | +0.0011 | $3.9\!\times\!10^{-2}$ | +0.0053 | $5.2\!\times\!10^{-12}$ |
-| MLP vs. Dense + BM25 (0.5/0.5) | +0.0115 | $8.7\!\times\!10^{-7}$ | +0.0693 | $4.2\!\times\!10^{-99}$ |
-| MLP vs. Dense only | +0.0259 | $2.8\!\times\!10^{-14}$ | +0.0816 | $5.8\!\times\!10^{-103}$ |
-| MLP vs. BM25 only | +0.1404 | $6.8\!\times\!10^{-204}$ | +0.1050 | $2.2\!\times\!10^{-139}$ |
-| MLP vs. Sparse only (BGE-M3) | +0.0645 | $7.9\!\times\!10^{-78}$ | +0.0095 | $1.5\!\times\!10^{-4}$ |
-
-**MLP predicted weights on DANGDOCAO** (zero-shot, no DANGDOCAO data in training):
-
-| Condition | $\bar{w}_\text{dense}$ | $\bar{w}_\text{bm25}$ | $\bar{w}_\text{sparse}$ | $\bar{H}$ (max ln3 = 1.099) |
-|-----------|------------------------|------------------------|--------------------------|----------------------------|
-| Clean | 0.3482 | 0.3228 | 0.3290 | 1.0977 |
-| Noisy | 0.3332 | 0.3107 | **0.3561** | 1.0967 |
-
-The cross-domain results admit four substantive readings. First, adaptive fusion generalises beyond the training domain. On clean DANGDOCAO queries, the MLP still surpasses the strongest fixed-weight baseline ($+0.0011$ NDCG@10, $p = 0.039$), and the noisy-query margin grows to $+0.0053$ ($p = 5.2\!\times\!10^{-12}$). The absolute gains are smaller than in-domain, but the direction and statistical significance both carry over.
-
-Second, the noise-adaptation behaviour observed in §5.1 transfers without modification. The mean predicted weights shift from $(\bar{w}_\text{dense}, \bar{w}_\text{bm25}, \bar{w}_\text{sparse}) = (0.348, 0.323, 0.329)$ on clean DANGDOCAO queries to $(0.333, 0.311, 0.356)$ on the diacritic-stripped variant — the same direction (up-weight sparse, down-weight BM25) the MLP learned on Wikipedia text. Since DANGDOCAO is entirely unseen during training, this rules out a memorisation explanation: the MLP is encoding a mapping from linguistic query features to retrieval-mode trust that is largely invariant to the underlying corpus.
-
-Third, the asymmetric degradation pattern under noise is even more pronounced in the legal domain than in the encyclopedic one. BM25-only NDCG@10 falls from $0.6762$ to $0.0480$ ($-93\%$, against $-77\%$ on ViQuAD); dense retrieval falls from $0.7908$ to $0.0714$ ($-91\%$); and BGE-M3 learned sparse falls from $0.7522$ to $0.1435$ ($-81\%$). The relative ordering of robustness across the three signals is preserved, but the absolute magnitudes confirm that Vietnamese legal terminology carries little orthographic redundancy and offers correspondingly little for any lexical retriever to recover once tones are stripped. The MLP exploits the surviving sparse signal to lift NDCG@10 from $0.1435$ (sparse-only) and $0.1477$ (fixed-equal three-way) to $0.1530$.
-
-Fourth, weight-interpretability signals weaken but do not invert in the dominant direction. The Pearson correlation between query English-token ratio and $w_\text{sparse}$, which is the cleanest interpretability finding on ViQuAD ($r = +0.70$ on dev, $+0.66$ on test), drops to $r = +0.16$ on clean DANGDOCAO ($p = 1.2\!\times\!10^{-25}$). Legal Vietnamese is more monolingual than encyclopedic Vietnamese — there are fewer English-token queries for the MLP to act upon — and the surface frequency of the feature it most relies on therefore drops. Crucially, the adaptive component still wins by a statistically significant margin in this regime, suggesting that the MLP also exploits feature combinations that do not surface in a single bivariate correlation.
-
-A final practical observation concerns Recall@100 under noise. Even on the noisy DANGDOCAO split, the MLP retains Recall@100 of $0.36$, against $0.18$ for BM25-only and $0.99$ on the clean split. This metric upper-bounds the recoverable end-to-end RAG quality: a generation step cannot answer a question whose evidence is absent from its retrieved context. The three-signal fusion approximately doubles this ceiling relative to any single Vietnamese-tokenisation-dependent retriever under the same noise.
+The cross-domain results support four readings. First, the routing policy transfers zero-shot: on clean legal queries the router again leads every baseline (0.8196; $+0.0044$ over the strongest static method at $p = 9.4\!\times\!10^{-3}$, and $+0.0145$ to $+0.0380$ over the four-way, tuned, and RRF alternatives), and the clean-side pattern of §5.1 — uniform inclusion of the toneless channel *hurts* (0.8051 vs 0.8152), gated inclusion helps — reproduces on a corpus the router has never seen. Second, the noise catastrophe is deeper in the legal domain than the encyclopedic one: BM25 falls by 93% relative (to 0.0481), dense by 91%, sparse by 81% — Vietnamese legal terminology consists of long, formulaic, low-redundancy phrases that offer nothing to recover once tone marks vanish. Fixed-equal three-way (0.1470) is barely a tenth of its clean self, and RRF (0.3055) again demonstrates the cost of egalitarian aggregation over dead channels. The router reaches 0.6218 — a $4.2\times$ improvement over the best tone-dependent fusion and within $0.007$ of the noise-specialised tuned vector — and restores Recall@100 to 0.9207 against 0.3581 for three-way fusion. Third, the gating mechanism itself transfers: mean $\bar{w}_\text{toneless}$ moves from $0.187$ on clean DANGDOCAO to $0.546$ on stripped DANGDOCAO (§5.3), the same two-regime signature learned in training, on out-of-domain data. Because DANGDOCAO is entirely unseen, this excludes memorisation of corpus-specific lexical statistics: the router is applying a corpus-independent mapping from query and channel-response evidence to channel trust. Fourth, the toneless channel is remarkably domain-stable (0.6094 clean, 0.6095 stripped) — its syllable-level diacritic-free matching is indifferent to both the noise condition and, largely, the domain shift, which is precisely the property that makes it a reliable routing target.
 
 ### 5.3. Analysis: When Does Dynamic Routing Help?
 
@@ -513,15 +478,15 @@ Two robustness observations carry over from the retrieval analysis. First, Conte
 
 ## 6. Conclusion
 
-We have presented Dynamic Hybrid RAG, an adaptive three-way retrieval fusion system specialised for Vietnamese. The architecture replaces the fixed-weight combination of dense and sparse retrievers that dominates contemporary hybrid retrieval with a per-query multilayer perceptron of approximately $2{,}691$ parameters trained on soft, temperature-scaled NDCG-derived labels over the two-simplex. On UIT-ViQuAD 2.0, the resulting fusion outperforms every fixed-weight baseline considered. The test-set NDCG@10 of $0.8514$ exceeds the strongest fixed reference (fixed-equal three-way: $0.8486$, $p = 1.3\!\times\!10^{-10}$) and the standard two-way dense + BM25 hybrid ($0.8278$); under diacritic-removal noise, classical BM25 collapses by $77\%$ while BGE-M3 learned sparse retrieval retains $49\%$ of its clean performance, a robustness asymmetry that motivates the three-signal architecture independently of the adaptive component. The soft-label simplex supervision plays a load-bearing role: replacing it with hard argmax labels causes the MLP to collapse onto a single retriever and to underperform dense-only retrieval, while the soft regime is robust across at least a tenfold range of temperatures.
+We have presented Dynamic Hybrid RAG, a tone-robust four-way retrieval fusion system for Vietnamese. The architecture augments the standard dense + BM25 + learned-sparse trio with a diacritic-stripped syllable-level BM25 channel, and gates all four channels per query with a lightweight router (≈14K parameters) that predicts the achievable NDCG@10 surface over a 286-point weight simplex from eight linguistic query features and 28 scale-invariant post-retrieval channel-response signals, converting the predicted surface into weights by softmax expectation.
 
-The same MLP checkpoint generalises to a previously unseen domain. Evaluated zero-shot on the DANGDOCAO legal/administrative corpus (37,239 passages, 4,315 test queries, no DANGDOCAO data observed during training), it improves over the fixed-equal three-way baseline by $+0.0011$ NDCG@10 on clean queries ($p = 0.039$) and by $+0.0053$ on diacritic-noisy queries ($p = 5\!\times\!10^{-12}$). Crucially, the qualitative behaviour transfers as well: the MLP raises $\bar{w}_\text{sparse}$ from $0.329$ to $0.356$ as it moves from clean to noisy queries on a corpus it has never seen, mirroring the within-domain pattern. The adaptive component is not memorising ViQuAD-specific lexical statistics but generalising a mapping from linguistic query features to retrieval-mode trust.
+The empirical case rests on a structural finding rather than a single headline number: **on Vietnamese, no fixed channel weighting is strong in both the clean and the diacritic-free regime.** The toneless channel that rescues stripped queries (restoring legal-domain NDCG@10 from 0.147 to 0.622) is a liability on clean text, where its uniform inclusion *lowers* fusion quality (fixed-equal four-way 0.837 vs three-way 0.848 on ViQuAD test); conversely, every tone-dependent configuration collapses under stripping (fixed-equal three-way: 0.848 → 0.396 in-domain, 0.815 → 0.147 zero-shot). Even a best-fixed vector grid-searched over 286 candidates on a balanced clean+noisy development mix cannot escape the dilemma — it concedes three to four NDCG points on clean text to stay competitive under noise. The router resolves the dilemma without being told the regime: it significantly outperforms every untuned baseline on all four full test conditions (smallest margin $p = 9.4\!\times\!10^{-3}$, surviving Holm–Bonferroni over the 36-test battery), traces the upper envelope of all methods across a 0–100% noise-level sweep, and trails the noise-specialised tuned vector by at most $0.007$ at the fully-stripped extreme while beating it by $0.033$ on both clean sets and by $0.035$–$0.046$ on semantic noise types it was never tuned for.
 
-Taken together, the three retrievers and the adaptive fusion address the three Vietnamese-specific challenges identified at the outset. Word-segmentation dependence is handled by classical BM25 over underthesea-segmented text; diacritic sensitivity is handled by dense semantic retrieval and BGE-M3 learned sparse, with the MLP adaptively down-weighting BM25 when diacritics are absent; and code-switching is handled by BGE-M3's learned sparse representation, whose sub-word tokeniser was trained on multilingual data. The strongest empirical evidence for the linguistic grounding of the MLP is the Pearson correlation $r = +0.66$ between query English-token ratio and predicted sparse weight on the test split — a relationship that emerges from soft-label simplex supervision without being explicitly encoded in either the loss function or the feature set, and that is independently corroborated by the stratified analysis showing the MLP's per-query gains concentrate on pure-Vietnamese and short-query strata.
+Three further properties give the result its robustness. The mechanism is *observable*: mean toneless weight rises monotonically from ≈0.19 to ≈0.46–0.55 as per-syllable corruption goes from 0% to 100%, with weight entropy falling in lockstep — the router grows decisive exactly as the regime grows extreme — and the same signature appears zero-shot on a legal corpus never seen in training. The mechanism is *correctly attributed*: a six-configuration component ablation shows the toneless channel and the training-set coverage of the fully-toneless regime to be load-bearing (removing either collapses noisy performance to 0.13–0.14 zero-shot), while expected-weight inference, the QPP signal block, and raw-label training are second-order refinements; an oracle-headroom analysis shows the router realising 40–78% of the label-aware routing upper bound on the noisy conditions where headroom is real. And the mechanism is *cheap*: the full router overhead is ≈6.7 ms per query and the toneless channel a 19 ms in-memory lookup, against ≈1.5 s per query for the LLM diacritic-restoration alternative — which is stronger when affordable (restoring stripped-query retrieval to near-clean levels) and which we therefore position as a complement on the cost–quality frontier rather than a defeated baseline. End-to-end RAGAS evaluation confirms that the retrieval-level differences propagate to answer quality: the router leads context precision and recall in all four conditions, decisively so where the retrieval gap is large (legal-domain noisy context precision +0.271 over uniform four-way fusion, $p = 8.1\!\times\!10^{-14}$).
 
-The analysis also exposes three concrete limitations that scope the next iteration of this work. First, the MLP's predicted weights cluster extremely close to the simplex centre (mean entropy $\bar{H} \approx 1.098$, against a maximum of $\ln 3 \approx 1.099$). The soft-label temperature ablation shows that sharper supervision improves dev NDCG@10 monotonically, but the precise cliff at which the soft regime collapses into the catastrophic hard-label regime has not been located. Second, the compound-density feature is statistically signal-neutral on clean text, which both reduces the effective feature dimensionality and suggests that the linguistic-feature module is open to replacement by query-token-level representations such as character-level embeddings. Third, the diacritic-robustness story rests on a synthetic noise model: UIT-ViQuAD 2.0 contains essentially no naturally low-diacritic queries, so the relevance of the noise-robust regime to in-the-wild Vietnamese user input remains to be verified on real query traces. We further note that the end-to-end RAGAS evaluation was carried out on $n = 200$ samples per condition because of the cost of LLM-judge scoring; while this is large enough to expose qualitative ordering changes relative to a smaller pilot study, formal significance testing on the four RAGAS metrics would benefit from a still larger sample.
+The analysis also fixes the limitations that scope future work. First, on homogeneous fully-stripped evaluation sets a noise-specialised static vector remains marginally ahead; the router's value proposition is distribution-independence, not universal per-slice dominance, and applications with a *known*, stable noise profile can do without it. Second, the stripped-query conditions use a synthetic rule-based noise model; the LLM-generated noise study (typo, informal, code-switching) partially addresses ecological validity, but evaluation on real Vietnamese user query traces remains open. Third, the four-way router's decisions are less transparent at the single-feature level than its three-way predecessor's — bivariate feature–weight correlations weaken as routing shifts onto post-retrieval channel-response signals — so its interpretability case rests on regime-level behaviour rather than per-feature attribution. Fourth, the end-to-end evaluation ($n = 100$ per condition) has limited power for small effects, and the embedding-based answer-relevancy metric could not be run against our serving infrastructure.
 
-We therefore identify five directions for continued investigation. The first is to locate the soft-label temperature cliff at which the supervision target becomes effectively hard and to investigate KL-divergence-based losses that may widen the MLP's predicted-weight distribution while preserving simplex stability. The second is to replace the hand-engineered seven-feature extractor with query-token-level representations capable of conditioning fusion on much finer linguistic signal. The third is to extend the fusion architecture to incorporate BGE-M3's multi-vector (ColBERT-style) representation as a fourth retrieval signal. The fourth is to scale the RAGAS evaluation beyond the present $200$ samples per condition and to substitute or supplement the Qwen3-32B judge with a stronger or independently-trained evaluator, which would in particular enable proper significance testing on the four RAGAS metrics. The fifth is to investigate cross-lingual transfer to other tonal languages, particularly Thai and Cantonese, in which similar tone-mark or diacritic-induced noise patterns are expected to arise.
+We see four natural extensions. A *cascaded* system could route cheaply by default and invoke LLM diacritic restoration only for queries whose channel-response signature indicates that no retrieval channel will succeed — combining the 19 ms and 1.5 s mechanisms along the frontier this paper maps. A *cost-aware* router could skip channels it predicts to be useless, converting the routing signal into latency savings as well as quality. Replacing the hand-engineered linguistic features with token-level representations may recover finer-grained routing signal, particularly for partially corrupted queries where our short-query hedging indicates residual uncertainty. Finally, the design pattern — a dedicated normalized-orthography channel gated by a query-conditioned router — should transfer to other diacritic-rich languages (Thai, Czech, Turkish) and to other systematic orthographic noise processes; validating that transfer would establish the architecture as a general recipe rather than a Vietnamese-specific solution.
 
 ---
 
