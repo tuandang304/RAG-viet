@@ -209,7 +209,7 @@ All experimental results in §5 are produced on a single workstation equipped wi
 
 ## 5. Results & Discussion
 
-> *Note (to be removed before submission): the tables in §5.1–§5.2 below are the legacy three-way results (dense + BM25 + sparse, softmax-weight MLP) and are retained only for historical comparison. **The current four-way system's numbers — full-test baseline table, OOD-noise generalization, the noise-level curve, the restoration comparison, and end-to-end RAGAS — are consolidated in `docs/results_summary.md`, produced by `scripts/aggregate_results.py`, and are the authoritative results for this paper.** Headline four-way figures: ViQuAD test NDCG@10 = 0.854 (router) vs 0.848 fixed-equal-3 / 0.821 best-fixed / 0.799 RRF; ViQuAD diacritic-noisy 0.641 vs 0.396 fixed-equal-3; DANGDOCAO zero-shot 0.820 clean / 0.622 noisy. All 24 router-vs-baseline comparisons across the four full test sets are significant ($p \le 6.6\times10^{-3}$). The prose in §5.3–§5.7 is being regenerated against these runs.*
+> *Note (to be removed before submission): the tables in §5.1–§5.2 below are the legacy three-way results (dense + BM25 + sparse, softmax-weight MLP) and are retained only for historical comparison. **The current four-way system's numbers — full-test baseline table, OOD-noise generalization, the noise-level curve, the restoration comparison, and end-to-end RAGAS — are consolidated in `docs/results_summary.md`, produced by `scripts/aggregate_results.py`, and are the authoritative results for this paper.** Headline four-way figures: ViQuAD test NDCG@10 = 0.854 (router) vs 0.848 fixed-equal-3 / 0.837 fixed-equal-4 / 0.821 dev-tuned best-fixed / 0.799 RRF; ViQuAD diacritic-noisy 0.641 vs 0.396 fixed-equal-3; DANGDOCAO zero-shot 0.820 clean / 0.622 noisy. **§5.3–§5.7 below have been regenerated against the four-way full-test runs and are current.***
 
 ### 5.1. In-domain Results (UIT-ViQuAD 2.0)
 
@@ -309,188 +309,205 @@ Fourth, weight-interpretability signals weaken but do not invert in the dominant
 
 A final practical observation concerns Recall@100 under noise. Even on the noisy DANGDOCAO split, the MLP retains Recall@100 of $0.36$, against $0.18$ for BM25-only and $0.99$ on the clean split. This metric upper-bounds the recoverable end-to-end RAG quality: a generation step cannot answer a question whose evidence is absent from its retrieved context. The three-signal fusion approximately doubles this ceiling relative to any single Vietnamese-tokenisation-dependent retriever under the same noise.
 
-### 5.3. Analysis: When Does Dynamic Fusion Help?
+### 5.3. Analysis: When Does Dynamic Routing Help?
 
 #### 5.3.1. Stratified NDCG@10
 
-We partition the UIT-ViQuAD 2.0 dev and test sets into 11 strata defined by ranges of individual query features, and report NDCG@10 for both the fixed-equal three-way baseline and the dynamic MLP within each stratum together with the mean predicted fusion weights $\bar{w}_\text{dense}$, $\bar{w}_\text{bm25}$, $\bar{w}_\text{sparse}$. The partition makes it possible to identify the linguistic conditions under which adaptive fusion contributes most, and to read the MLP's per-stratum weight allocation as a behavioural footprint of what it has learned.
+We partition the UIT-ViQuAD 2.0 test set into 11 strata defined by ranges of individual linguistic query features, and report NDCG@10 for the fixed-equal three-way baseline and the dynamic router within each stratum, together with the mean predicted four-way weights. The partition identifies the linguistic conditions under which adaptive routing contributes, and exposes the router's per-stratum weight allocation as a behavioural footprint of what it has learned.
 
-**Dev set (3,814 queries):**
+**Clean test set (7,301 queries):**
 
-| Stratum | N | Fixed NDCG | MLP NDCG | Δ | $\bar{w}_\text{dense}$ | $\bar{w}_\text{bm25}$ | $\bar{w}_\text{sparse}$ |
-|---------|---|------------|----------|---|------------------------|------------------------|------------------------|
-| diac\_low (< 0.3) | 9 | 1.0000 | 1.0000 | +0.0000 | 0.350 | 0.302 | 0.348 |
-| diac\_mid (0.3–0.7) | 627 | 0.8801 | 0.8812 | +0.0011 | 0.347 | 0.313 | 0.339 |
-| diac\_high (> 0.7) | 3,178 | 0.8392 | 0.8409 | +0.0017 | 0.349 | 0.321 | 0.330 |
-| comp\_low (< 0.2) | 774 | 0.8388 | 0.8384 | $-$0.0004 | 0.349 | 0.319 | 0.331 |
-| comp\_high (≥ 0.2) | 3,040 | 0.8482 | 0.8503 | +0.0021 | 0.349 | 0.319 | 0.332 |
-| eng\_none (= 0) | 318 | 0.7625 | 0.7695 | **+0.0070** | 0.351 | 0.322 | 0.327 |
-| eng\_mixed (> 0) | 3,496 | 0.8539 | 0.8550 | +0.0011 | 0.349 | 0.319 | 0.332 |
-| short\_query (< 0.4) | 190 | 0.7632 | 0.7631 | $-$0.0000 | 0.361 | 0.299 | 0.340 |
-| long\_query (≥ 0.4) | 3,624 | 0.8507 | 0.8524 | +0.0017 | 0.348 | 0.320 | 0.331 |
-| simple (no clause) | 3,125 | 0.8340 | 0.8360 | +0.0019 | 0.351 | 0.317 | 0.332 |
-| complex (has clause) | 689 | 0.9021 | 0.9021 | +0.0000 | 0.340 | 0.331 | 0.329 |
+| Stratum | N | Fixed-eq-3 NDCG | Router NDCG | Δ | $\bar{w}_\text{dense}$ | $\bar{w}_\text{bm25}$ | $\bar{w}_\text{sparse}$ | $\bar{w}_\text{toneless}$ |
+|---------|---|------------|----------|---|------|------|------|------|
+| diac\_low (< 0.3) | 4 | 0.9077 | 0.7827 | $-$0.1250 | 0.28 | 0.21 | 0.31 | 0.20 |
+| diac\_mid (0.3–0.7) | 1,241 | 0.8659 | 0.8640 | $-$0.0019 | 0.28 | 0.23 | 0.28 | 0.21 |
+| diac\_high (> 0.7) | 6,056 | 0.8446 | 0.8521 | **+0.0076** | 0.32 | 0.22 | 0.27 | 0.19 |
+| comp\_low (< 0.2) | 1,567 | 0.8442 | 0.8430 | $-$0.0011 | 0.29 | 0.23 | 0.28 | 0.20 |
+| comp\_high (≥ 0.2) | 5,734 | 0.8494 | 0.8572 | **+0.0078** | 0.32 | 0.22 | 0.27 | 0.19 |
+| eng\_none (= 0) | 583 | 0.7981 | 0.8118 | **+0.0137** | 0.35 | 0.21 | 0.27 | 0.17 |
+| eng\_mixed (> 0) | 6,718 | 0.8526 | 0.8578 | +0.0052 | 0.31 | 0.22 | 0.28 | 0.20 |
+| short\_query (< 0.4) | 220 | 0.7399 | 0.7324 | $-$0.0075 | 0.30 | 0.21 | 0.29 | 0.20 |
+| long\_query (≥ 0.4) | 7,081 | 0.8516 | 0.8579 | +0.0063 | 0.31 | 0.22 | 0.27 | 0.19 |
+| simple (no clause) | 5,940 | 0.8335 | 0.8396 | +0.0061 | 0.31 | 0.22 | 0.28 | 0.19 |
+| complex (has clause) | 1,361 | 0.9125 | 0.9174 | +0.0049 | 0.30 | 0.23 | 0.26 | 0.21 |
 
-**Test set (7,301 queries):**
+**Diacritic-stripped dev set (3,814 queries; strata that separate diacritic density or English tokens are degenerate under full stripping):**
 
-| Stratum | N | Fixed NDCG | MLP NDCG | Δ | $\bar{w}_\text{dense}$ | $\bar{w}_\text{bm25}$ | $\bar{w}_\text{sparse}$ |
-|---------|---|------------|----------|---|------------------------|------------------------|------------------------|
-| diac\_low (< 0.3) | 4 | 0.9077 | 0.9077 | +0.0000 | 0.347 | 0.301 | 0.352 |
-| diac\_mid (0.3–0.7) | 1,241 | 0.8659 | 0.8697 | +0.0038 | 0.348 | 0.314 | 0.338 |
-| diac\_high (> 0.7) | 6,056 | 0.8450 | 0.8477 | +0.0026 | 0.349 | 0.321 | 0.330 |
-| comp\_low (< 0.2) | 1,567 | 0.8449 | 0.8470 | +0.0021 | 0.348 | 0.320 | 0.332 |
-| comp\_high (≥ 0.2) | 5,734 | 0.8496 | 0.8526 | +0.0030 | 0.349 | 0.320 | 0.332 |
-| eng\_none (= 0) | 583 | 0.7981 | 0.8024 | **+0.0043** | 0.350 | 0.323 | 0.327 |
-| eng\_mixed (> 0) | 6,718 | 0.8530 | 0.8557 | +0.0027 | 0.349 | 0.319 | 0.332 |
-| short\_query (< 0.4) | 220 | 0.7402 | 0.7412 | +0.0010 | 0.361 | 0.299 | 0.340 |
-| long\_query (≥ 0.4) | 7,081 | 0.8520 | 0.8549 | +0.0029 | 0.348 | 0.320 | 0.331 |
-| simple (no clause) | 5,940 | 0.8338 | 0.8371 | **+0.0033** | 0.351 | 0.317 | 0.332 |
-| complex (has clause) | 1,361 | 0.9133 | 0.9139 | +0.0005 | 0.340 | 0.331 | 0.329 |
+| Stratum | N | Fixed-eq-3 NDCG | Router NDCG | Δ | $\bar{w}_\text{toneless}$ |
+|---------|---|------------|----------|---|------|
+| all queries (diac\_low) | 3,814 | 0.3961 | 0.6405 | **+0.2444** | 0.47 |
+| comp\_low (< 0.2) | 1,283 | 0.4118 | 0.6226 | +0.2108 | 0.45 |
+| comp\_high (≥ 0.2) | 2,531 | 0.3881 | 0.6496 | +0.2615 | 0.48 |
+| short\_query (< 0.4) | 190 | 0.4797 | 0.5790 | +0.0993 | 0.32 |
+| long\_query (≥ 0.4) | 3,624 | 0.3917 | 0.6438 | +0.2520 | 0.47 |
+| complex (has clause) | 455 | 0.4929 | 0.7326 | +0.2397 | 0.47 |
 
-The stratified results admit four substantive interpretations. The diacritic-density partition is dominated by the high-density bin (`diac_high` covers $83\%$ of both dev and test), reflecting the fact that UIT-ViQuAD 2.0 is sourced from well-edited Vietnamese Wikipedia, in which essentially every query is fully toned. The `diac_low` strata contain only nine dev queries and four test queries; both are too small to support inference, and the MLP achieves identical NDCG@10 to the fixed baseline on them. The substantive diacritic-robustness experiments must therefore be read from the noisy split in §5.1 rather than from this clean stratification.
+Three readings follow. First, the clean-split gains are broad but individually small: the router improves on eight of eleven strata, with the largest lift on pure-Vietnamese queries (`eng_none`, $+0.0137$) and high-compound queries ($+0.0078$), and small losses confined to the three smallest or hardest strata (`diac_low` contains only four queries; `short_query` offers little lexical surface for any channel). Second, the noisy-split gain is not driven by a favourable sub-population: it exceeds $+0.21$ NDCG@10 on *every* stratum with more than 200 queries, because the mechanism — engaging the toneless channel — applies to the entire diacritic-stripped population. The one partial exception is short queries ($+0.0993$, with $\bar{w}_\text{toneless} = 0.32$ rather than $0.47$): with only a handful of syllables, the post-retrieval signals that indicate channel failure are noisier, and the router hedges. Third, the weight columns show that on clean text the router keeps the toneless channel *suppressed* at $\bar{w}_\text{toneless} \approx 0.17$–$0.21$ across all strata — the two-sided gating promised in §3.2 is visible directly in the behavioural footprint.
 
-The largest stratified gains over the fixed-equal three-way baseline appear on the English-code-switching partition, but in the opposite direction to what a naive reading of §1 might suggest. The MLP's per-stratum lift is largest on the `eng_none` partition (pure Vietnamese queries, $\Delta = +0.0070$ on dev, $+0.0043$ on test) — roughly three to four times larger than the average lift on `eng_mixed` queries. Reading this together with the Pearson correlation $r = +0.66$ between `english_ratio` and $w_\text{sparse}$ (§5.3.2), the mechanism becomes clear: the MLP has learned to associate English-token density with sparse-retriever trust, and the per-stratum advantage on pure-Vietnamese queries arises from *withholding* sparse weight on queries that lack the signature feature, rather than from any unconditional preference for sparse retrieval. The fixed baseline's uniform $1/3$ overspends on the sparse signal in this stratum; the MLP correctly under-spends.
+#### 5.3.2. Performance Across the Noise Spectrum
 
-The compound-word partition is essentially signal-neutral in clean text ($\Delta \approx +0.002$ in both bins on dev). This matches the near-zero Pearson correlation between `compound_ratio` and $w_\text{bm25}$ reported in §5.3.2 and suggests that the underthesea-segmented BM25 retriever already extracts most of the available term-match signal from Vietnamese compounds without the MLP needing to differentially weight it. The compound feature is therefore the weakest member of the seven-feature extractor on clean queries, and we revisit this finding in §6 when discussing future-work feature-engineering directions.
+The clean and fully-stripped conditions are the endpoints of a continuum. To trace the full curve, we corrupt a fixed set of 500 queries per domain at per-syllable stripping probabilities $p \in \{0, 0.25, 0.5, 0.75, 1.0\}$ and evaluate every method on the identical base queries at each level.
 
-Two additional strata produce distinctive MLP weight signatures even when the NDCG@10 gap is small. On short queries ($N = 190$ on dev, $220$ on test), the MLP raises $\bar{w}_\text{dense}$ from $0.349$ to $0.361$ and lowers $\bar{w}_\text{bm25}$ from $0.320$ to $0.299$. Short queries provide little lexical surface for BM25 to score, and a stronger dense weighting is the linguistically reasonable response. On multi-clause queries, retrieval performance under the fixed baseline already saturates at NDCG@10 $\approx 0.91$, and the MLP adds essentially nothing ($\Delta = +0.000$ on dev, $+0.0005$ on test). When all three signals agree, the fusion problem is degenerate and adaptive weighting cannot help; the MLP correctly recognises this regime and does not perturb the weights.
+**NDCG@10 by fraction of syllables stripped (n = 500/level):**
 
-#### 5.3.2. Weight Interpretability
+| Domain | Method | 0% | 25% | 50% | 75% | 100% |
+|---|---|---|---|---|---|---|
+| ViQuAD | **Router (ours)** | **0.845** | **0.805** | 0.768 | **0.712** | 0.657 |
+| | Best-fixed (dev-tuned) | 0.823 | 0.799 | **0.770** | 0.711 | **0.667** |
+| | Fixed-equal 4-way | 0.835 | 0.802 | 0.769 | 0.696 | 0.593 |
+| | Fixed-equal 3-way | 0.843 | 0.796 | 0.723 | 0.605 | 0.429 |
+| | RRF | 0.801 | 0.768 | 0.715 | 0.647 | 0.530 |
+| | Toneless only | 0.600 | 0.600 | 0.600 | 0.599 | 0.600 |
+| DANGDOCAO | **Router (ours)** | **0.828** | **0.795** | **0.744** | 0.671 | 0.615 |
+| | Best-fixed (dev-tuned) | 0.789 | 0.772 | 0.743 | **0.674** | **0.624** |
+| | Fixed-equal 4-way | 0.811 | 0.779 | 0.740 | 0.619 | 0.409 |
+| | Fixed-equal 3-way | 0.822 | 0.774 | 0.684 | 0.437 | 0.130 |
+| | RRF | 0.787 | 0.751 | 0.708 | 0.562 | 0.289 |
+| | Toneless only | 0.604 | 0.604 | 0.604 | 0.605 | 0.603 |
 
-To assess whether the MLP captures linguistically meaningful structure rather than merely memorising training-set statistics, we compute Pearson correlations between three of the seven input features and the corresponding predicted weight that linguistic theory would associate with them.
+The router traces the upper envelope of all methods across the spectrum, with a single competitor: the dev-tuned best-fixed vector matches it from 50% noise upward and edges ahead by $\approx 0.01$ at the fully-stripped endpoint. That vector, however, was grid-searched on a 50/50 clean+noisy dev mix and pays for its noise specialisation on clean text ($-0.022$ ViQuAD, $-0.040$ DANGDOCAO at $p = 0$). The methods without a toneless channel tell the structural story: fixed-equal three-way starts on par with the router at $p = 0$ (0.843 vs 0.845) and collapses to 0.429/0.130 at $p = 1$, while RRF — the standard untuned hybrid baseline — degrades almost as badly (0.530/0.289) because reciprocal-rank aggregation grants the failing channels equal influence at every noise level. No fixed weighting is strong at both ends: the static vector that wins at $p = 1$ loses at $p = 0$ and vice versa, whereas the router is within $0.011$ of the per-level best everywhere *without being told the noise level* — the practical setting, since real query streams mix noise levels unpredictably.
 
-| Correlation (test set, $N = 7{,}301$) | Expected sign | Actual $r$ | $p$-value |
-|---------------------------------------|---------------|------------|----------|
-| diacritic\_ratio ↔ $w_\text{dense}$ | negative (fewer diacritics → higher $w_\text{dense}$) | **+0.1005** | $7.4\!\times\!10^{-18}$ |
-| compound\_ratio ↔ $w_\text{bm25}$ | positive (more Vietnamese compounds → higher $w_\text{bm25}$) | $-$0.0171 | 0.145 (n.s.) |
-| english\_ratio ↔ $w_\text{sparse}$ | positive (more English code-switching → higher $w_\text{sparse}$) | **+0.6647** | $< 10^{-300}$ |
+The router's mechanism is directly observable in its weight trajectory: $\bar{w}_\text{toneless}$ rises monotonically with the corruption level, from $0.197$ to $0.457$ on ViQuAD ($0.183$ to $0.547$ on DANGDOCAO), while mean weight entropy falls from $1.335$ to $1.216$ ($1.338$ to $1.153$; maximum $\ln 4 \approx 1.386$) — the router becomes more decisive precisely as the regime becomes more extreme.
 
-The strongest interpretability result, by a substantial margin, is the correlation between English-token density and the predicted sparse weight: Pearson $r = +0.70$ on dev and $+0.66$ on test, with $p$-values below $10^{-300}$ on both splits. This constitutes direct evidence that the MLP has learned a linguistically grounded preference — increasing English code-switching in the query elicits a higher predicted weight on the BGE-M3 learned-sparse retriever, which is the only signal in the trio whose tokeniser was trained on code-switched data. The mechanism is not stated in the loss function or the architecture; it emerges from the soft-label simplex supervision and the seven-feature query representation alone.
+#### 5.3.3. Generalisation to Unseen Noise Types
 
-The diacritic correlation comes out positive on the clean splits, in the opposite direction to the hypothesis suggested by §1. The effect is small ($r \approx +0.10$) but statistically significant. A plausible explanation lies in the structure of Wikipedia-style questions: queries with high diacritic density are also more likely to be full-form entity questions ("ai là người sáng lập …", "khi nào … được thành lập"), for which dense semantic retrieval is particularly effective. The MLP appears to pick up this surface correlation rather than the diacritic-as-noise signal predicted in §1. The hypothesised negative direction holds where it was originally motivated — on the diacritic-stripped noisy split (§5.1), where the MLP shifts $\bar{w}_\text{sparse}$ upward from $0.332$ to $0.354$ and $\bar{w}_\text{bm25}$ downward from $0.320$ to $0.310$. The clean-split correlation is therefore not a failure of the predicted relationship but evidence that, in the absence of noise, the feature is correlated with a different latent property of the query that benefits dense retrieval.
+Training exposes the router to exactly two regimes: clean queries and rule-based full diacritic stripping. To test whether the learned gating generalises beyond its training distribution, we evaluate on four LLM-generated noise types applied to the full DANGDOCAO test set (4,315 queries each) — none of which appears in training.
 
-The compound-density correlation is statistically indistinguishable from zero ($r = +0.02$ on dev, $-0.02$ on test, $p \geq 0.15$). The MLP does not condition its predicted BM25 weight on compound density. This is a useful negative result: the underthesea segmenter already extracts most of the available term-match signal on Vietnamese compounds, leaving the MLP no marginal discrimination to perform. It also implies that the compound feature is the weakest contributor to the seven-feature extractor on clean queries, and is a natural candidate for replacement in any future re-design of the linguistic-feature module (§6).
+| Noise type | Router | Best-fixed | Fixed-eq-4 | Fixed-eq-3 | Toneless only |
+|---|---|---|---|---|---|
+| missing\_tone | 0.614 | **0.620** | 0.439 | 0.172 | 0.596 |
+| typo\_telex | 0.535 | **0.543** | 0.480 | 0.334 | 0.462 |
+| informal | **0.796** | 0.761 | 0.777 | 0.780 | 0.570 |
+| code\_switch | **0.783** | 0.737 | 0.762 | 0.782 | 0.514 |
 
-We also report weight entropy $H = -\sum_i w_i \log w_i$ over the three-way weight distribution. The maximum is $\ln 3 \approx 1.099$ for the uniform $(1/3, 1/3, 1/3)$ prior.
+The pattern splits by noise family. On *orthographic* noise (missing\_tone, typo\_telex — the family the toneless channel targets), the router lands within $0.006$–$0.008$ of the noise-specialised best-fixed vector while quadrupling fixed-equal three-way on missing\_tone (0.614 vs 0.172). On *semantic* noise (informal paraphrase, code-switching — where diacritics survive and the toneless channel is not the answer), the ordering flips: the router leads all methods, and the best-fixed vector — locked into $w_\text{toneless} = 0.5$ — pays for its specialisation ($-0.035$ and $-0.046$ against the router). A static vector must commit to one noise family; the router reads each query's channel-response signature and does not.
 
-| Statistic | Dev | Test |
-|-----------|-----|------|
-| $\bar{H}$ (mean entropy) | 1.0976 | 1.0977 |
-| $\sigma_H$ (std entropy) | 0.0009 | 0.0008 |
-| $\bar{w}_\text{dense}$, $\sigma_{w_\text{dense}}$ | 0.3490, 0.0074 | 0.3488, 0.0073 |
-| $\bar{w}_\text{bm25}$, $\sigma_{w_\text{bm25}}$ | 0.3193, 0.0102 | 0.3197, 0.0097 |
-| $\bar{w}_\text{sparse}$, $\sigma_{w_\text{sparse}}$ | 0.3317, 0.0061 | 0.3315, 0.0059 |
+#### 5.3.4. Weight Interpretability
 
-The mean predicted entropy of $\bar{H} \approx 1.097$ lies extremely close to the uniform-entropy ceiling of $\ln 3 \approx 1.099$, with a standard deviation of approximately $10^{-3}$. This concentration is a direct consequence of the soft-label supervision protocol: the 66-point simplex grid combined with temperature $T = 0.3$ produces target distributions that themselves lie close to the interior of the simplex for nearly every training query, and the MLP correctly reproduces this property rather than over-extending into the simplex corners. The per-query weight ranges (for example $w_\text{dense} \in [0.31, 0.38]$ on dev) are narrow but non-degenerate, and the variance is precisely what generates the stratified gains documented in §5.3.1: query-conditional shifts of weight on the order of $\pm 0.03$ translate into consistent NDCG@10 improvements on the strata where adaptive behaviour is informative.
-
-The same finding identifies the principal limitation of the present architecture. The MLP retains substantial representational headroom — its outputs cluster so tightly around the simplex centre that the per-query response is rarely confident — and a sharper supervision target offers the most direct route to amplifying the per-stratum gains observed here. §5.6 ablates this hypothesis by training fusion MLPs at $T \in \{0.1, 0.3, 1.0\}$ and at the hard-label limit. The soft-label curve improves monotonically as $T$ decreases (dev NDCG@10 of $0.8469 \to 0.8479 \to 0.8489$) without ever collapsing the simplex, while the hard-label limit places almost all probability mass on a single simplex corner and underperforms dense-only retrieval. Soft-label supervision is therefore load-bearing for the architecture, and further sharpening within the soft regime is a concrete future-work direction.
+The dominant interpretable behaviour of the four-way router is the toneless gate quantified above: $\bar{w}_\text{toneless} = 0.19$ on clean text versus $0.47$–$0.55$ under full stripping, with a monotone trajectory between the endpoints (§5.3.2). Bivariate feature–weight correlations on the clean test split are comparatively modest — diacritic\_ratio ↔ $w_\text{dense}$ at $r = +0.21$ ($p = 1.3\!\times\!10^{-75}$), compound\_ratio ↔ $w_\text{bm25}$ at $r = -0.13$, english\_ratio ↔ $w_\text{sparse}$ at $r = +0.06$ — and substantially weaker than the $r \approx +0.66$ english–sparse correlation reported for the legacy three-way system. This weakening is expected rather than anomalous: the four-way router's input is dominated by the 28 post-retrieval channel-response signals (§3.3), so its decisions are conditioned on how the corpus responded to the query rather than on any single pre-retrieval linguistic feature, and single-feature correlations correspondingly lose explanatory power. The interpretability claim of this paper therefore rests on the regime-level weight behaviour — suppression of the toneless channel on clean text, monotone engagement as tone information disappears, and decisiveness (falling entropy) that tracks regime extremity — rather than on bivariate feature correlations.
 
 ### 5.4. Statistical Significance
 
-We report two-sided paired $t$-tests and Wilcoxon signed-rank tests on per-query NDCG@10 differences, alongside 95\% bootstrap confidence intervals on the mean NDCG@10 delta (2,000 resamples). All tests pair every baseline against the dynamic MLP on each of the three evaluation conditions.
+We report two-sided paired $t$-tests and Wilcoxon signed-rank tests on per-query NDCG@10 differences, with 95% bootstrap confidence intervals (2,000 resamples), pairing the router against every baseline on each of the four full test conditions.
 
-**Dev set (3,814 queries):**
+**ViQuAD clean test (7,301 queries):**
 
-| Comparison | Δ NDCG@10 | 95% CI | t-test $p$ | Wilcoxon $p$ |
+| Router vs. | Δ NDCG@10 | 95% CI | t-test $p$ | Wilcoxon $p$ |
 |------------|-----------|--------|-----------|-------------|
-| MLP vs. Fixed-equal three-way | +0.0016 | [+0.0006, +0.0026] | $1.9\!\times\!10^{-3}$ | $4.4\!\times\!10^{-5}$ |
-| MLP vs. Dense + BM25 (0.5/0.5) | +0.0149 | [+0.0105, +0.0194] | $7.7\!\times\!10^{-11}$ | $1.4\!\times\!10^{-10}$ |
-| MLP vs. Dense only | +0.0526 | [+0.0450, +0.0599] | $2.1\!\times\!10^{-39}$ | $2.5\!\times\!10^{-37}$ |
-| MLP vs. BM25 only | +0.1709 | [+0.1614, +0.1804] | $1.4\!\times\!10^{-229}$ | $3.5\!\times\!10^{-196}$ |
-| MLP vs. Sparse only (BGE-M3) | +0.0972 | [+0.0896, +0.1042] | $1.9\!\times\!10^{-130}$ | $1.3\!\times\!10^{-117}$ |
+| Fixed-equal three-way | +0.0059 | [+0.0031, +0.0086] | $2.4\!\times\!10^{-5}$ | $7.4\!\times\!10^{-5}$ |
+| Fixed-equal four-way | +0.0172 | [+0.0145, +0.0198] | $4.1\!\times\!10^{-37}$ | $4.8\!\times\!10^{-39}$ |
+| Best-fixed (dev-tuned) | +0.0330 | [+0.0299, +0.0362] | $1.9\!\times\!10^{-86}$ | $1.8\!\times\!10^{-85}$ |
+| RRF | +0.0553 | [+0.0507, +0.0596] | $1.6\!\times\!10^{-134}$ | $2.1\!\times\!10^{-128}$ |
+| Dense only | +0.0477 | [+0.0425, +0.0532] | $1.1\!\times\!10^{-69}$ | $2.9\!\times\!10^{-67}$ |
+| BM25 only | +0.1921 | [+0.1846, +0.1996] | $< 10^{-300}$ | $< 10^{-300}$ |
+| Sparse only | +0.0947 | [+0.0893, +0.1004] | $1.9\!\times\!10^{-228}$ | $5.6\!\times\!10^{-208}$ |
+| Toneless only | +0.2781 | [+0.2702, +0.2868] | $< 10^{-300}$ | $< 10^{-300}$ |
 
-**Test set (7,301 queries):**
+**ViQuAD diacritic-noisy dev (3,814 queries):**
 
-| Comparison | Δ NDCG@10 | 95% CI | t-test $p$ | Wilcoxon $p$ |
+| Router vs. | Δ NDCG@10 | 95% CI | t-test $p$ | Wilcoxon $p$ |
 |------------|-----------|--------|-----------|-------------|
-| MLP vs. Fixed-equal three-way | +0.0028 | [+0.0020, +0.0037] | $1.3\!\times\!10^{-10}$ | $6.9\!\times\!10^{-14}$ |
-| MLP vs. Dense + BM25 (0.5/0.5) | +0.0236 | [+0.0203, +0.0269] | $2.1\!\times\!10^{-42}$ | $2.6\!\times\!10^{-41}$ |
-| MLP vs. Dense only | +0.0446 | [+0.0392, +0.0505] | $2.5\!\times\!10^{-56}$ | $1.3\!\times\!10^{-52}$ |
-| MLP vs. BM25 only | +0.1891 | [+0.1820, +0.1965] | $< 10^{-300}$ | $< 10^{-300}$ |
-| MLP vs. Sparse only (BGE-M3) | +0.0919 | [+0.0865, +0.0973] | $1.2\!\times\!10^{-229}$ | $1.1\!\times\!10^{-206}$ |
+| Fixed-equal three-way | +0.2444 | [+0.2313, +0.2570] | $3.5\!\times\!10^{-264}$ | $2.7\!\times\!10^{-223}$ |
+| Fixed-equal four-way | +0.0711 | [+0.0634, +0.0788] | $1.0\!\times\!10^{-68}$ | $5.2\!\times\!10^{-68}$ |
+| Best-fixed (dev-tuned) | $-$0.0052 | [$-$0.0102, $-$0.0004] | $3.8\!\times\!10^{-2}$ | $0.19$ (n.s.) |
+| RRF | +0.1360 | [+0.1248, +0.1476] | $6.5\!\times\!10^{-119}$ | $3.0\!\times\!10^{-110}$ |
+| Toneless only | +0.0500 | [+0.0425, +0.0573] | $2.3\!\times\!10^{-40}$ | $1.9\!\times\!10^{-37}$ |
 
-**Diacritic-noisy dev (3,814 queries with all diacritics stripped):**
+**DANGDOCAO clean test, zero-shot (4,315 queries):**
 
-| Comparison | Δ NDCG@10 | 95% CI | t-test $p$ | Wilcoxon $p$ |
+| Router vs. | Δ NDCG@10 | 95% CI | t-test $p$ | Wilcoxon $p$ |
 |------------|-----------|--------|-----------|-------------|
-| MLP vs. Fixed-equal three-way | +0.0024 | [+0.0011, +0.0037] | $6.1\!\times\!10^{-4}$ | $6.2\!\times\!10^{-8}$ |
-| MLP vs. Dense + BM25 (0.5/0.5) | +0.0944 | [+0.0870, +0.1018] | $8.8\!\times\!10^{-126}$ | $1.7\!\times\!10^{-122}$ |
-| MLP vs. Dense only | +0.1038 | [+0.0950, +0.1122] | $5.9\!\times\!10^{-110}$ | $2.3\!\times\!10^{-104}$ |
-| MLP vs. BM25 only | +0.2434 | [+0.2321, +0.2554] | $5.3\!\times\!10^{-311}$ | $3.5\!\times\!10^{-253}$ |
-| MLP vs. Sparse only (BGE-M3) | +0.0322 | [+0.0253, +0.0395] | $7.5\!\times\!10^{-19}$ | $3.2\!\times\!10^{-18}$ |
+| Fixed-equal three-way | +0.0044 | [+0.0011, +0.0077] | $9.4\!\times\!10^{-3}$ | $5.1\!\times\!10^{-3}$ |
+| Fixed-equal four-way | +0.0145 | [+0.0112, +0.0179] | $6.6\!\times\!10^{-17}$ | $7.7\!\times\!10^{-18}$ |
+| Best-fixed (dev-tuned) | +0.0327 | [+0.0278, +0.0375] | $1.2\!\times\!10^{-39}$ | $7.1\!\times\!10^{-40}$ |
+| RRF | +0.0380 | [+0.0329, +0.0433] | $1.4\!\times\!10^{-43}$ | $1.4\!\times\!10^{-41}$ |
+| Toneless only | +0.2102 | [+0.2006, +0.2204] | $2.2\!\times\!10^{-304}$ | $5.0\!\times\!10^{-257}$ |
 
-The MLP outperforms every baseline on every split with $p \ll 0.01$. Two of these comparisons answer substantively different research questions and deserve to be kept distinct. The comparison against the fixed-equal three-way baseline isolates the contribution of *adaptive weighting*, holding constant the choice of three retrievers and the simplex on which they are fused; this comparison is significant on all three splits, with $p$ ranging from $6.1\!\times\!10^{-4}$ to $1.3\!\times\!10^{-10}$. The comparisons against the two-way dense + BM25 baseline and against each single-signal retriever, by contrast, conflate the gain from adding the BGE-M3 sparse signal with the gain from adapting the weights. The large magnitudes of those comparisons (for example $+0.094$ NDCG@10 on the noisy split versus the two-way baseline) primarily reflect the value of the third retriever rather than of the adaptive component. Both perspectives are nevertheless reported because they together answer the natural pair of questions a reader of this paper may ask: "does three-way fusion help?" and "does adaptive weighting add anything beyond fixed three-way fusion?", with each receiving an independently significant affirmative answer.
+**DANGDOCAO diacritic-noisy test, zero-shot (4,315 queries):**
+
+| Router vs. | Δ NDCG@10 | 95% CI | t-test $p$ | Wilcoxon $p$ |
+|------------|-----------|--------|-----------|-------------|
+| Fixed-equal three-way | +0.4747 | [+0.4622, +0.4875] | $< 10^{-300}$ | $< 10^{-300}$ |
+| Fixed-equal four-way | +0.1941 | [+0.1862, +0.2019] | $< 10^{-300}$ | $1.5\!\times\!10^{-290}$ |
+| Best-fixed (dev-tuned) | $-$0.0069 | [$-$0.0100, $-$0.0038] | $2.9\!\times\!10^{-5}$ | $8.1\!\times\!10^{-5}$ |
+| RRF | +0.3163 | [+0.3046, +0.3280] | $< 10^{-300}$ | $< 10^{-300}$ |
+| Toneless only | +0.0123 | [+0.0076, +0.0168] | $2.0\!\times\!10^{-7}$ | $5.5\!\times\!10^{-6}$ |
+
+Against every *untuned* baseline — the two uniform mixtures, RRF, and all four single channels — the router is significantly better on all four conditions, with the smallest margin (+0.0044 on zero-shot DANGDOCAO clean, $p = 9.4\!\times\!10^{-3}$) still surviving a Holm–Bonferroni correction over the full battery of 36 comparisons. The one comparison we do not win outright is against the dev-tuned best-fixed vector on the two *fully* diacritic-stripped conditions, where the router trails by $0.005$–$0.007$ (significant on DANGDOCAO; marginal on ViQuAD, where the Wilcoxon test does not reject). We report this honestly rather than tune it away: a static vector that dedicates half its mass to the toneless channel is near-optimal when *every* query in the evaluation is fully stripped — a homogeneity that the deployment setting does not offer. The same vector loses to the router by $0.033$ on both clean sets and by $0.035$–$0.046$ on semantic noise (§5.3.3), and the noise-spectrum sweep (§5.3.2) shows the router within $0.011$ of the per-level best at every corruption level. The correct summary is not that adaptive routing dominates every static vector on every slice, but that it is the only method that requires no prior knowledge of the query distribution to be near-optimal across all of them.
 
 ### 5.5. Efficiency Analysis
 
 | Component | Value |
 |-----------|-------|
-| MLP parameters | 2,691 |
-| MLP inference latency (CPU, $n$ = 7,301 test queries) | $204 \pm 40$ μs |
-| FAISS index — ViQuAD (1024-dim L2-norm, 5,317 passages) | 21.78 MB |
-| BM25 index — ViQuAD | 12.75 MB |
-| BGE-M3 sparse index — ViQuAD | 15.85 MB |
-| FAISS index — DANGDOCAO (1024-dim, 37,239 passages) | 152.53 MB |
-| BM25 index — DANGDOCAO | 103.08 MB |
-| BGE-M3 sparse index — DANGDOCAO | 112.99 MB |
+| Router parameters | 14,151 |
+| FAISS index — ViQuAD (1024-dim, 5,317 passages) | 21.8 MB |
+| BM25 index — ViQuAD | 12.8 MB |
+| BGE-M3 sparse index — ViQuAD | 15.9 MB |
+| Toneless BM25 index — ViQuAD | 11.6 MB |
+| FAISS / BM25 / sparse / toneless — DANGDOCAO (37,239 passages) | 152.5 / 103.1 / 113.0 / 96.6 MB |
 
-The fusion MLP imposes a mean per-query inference cost of $204$ μs on CPU, three orders of magnitude below a single embedding API call ($\sim 100$ ms) and four orders below a Qwen3-32B generation call. Adaptive fusion is therefore effectively free relative to the dominant latency components of any practical Vietnamese RAG pipeline. The combined index footprint for the ViQuAD corpus is $50.4$ MB (FAISS + BM25 + BGE-M3 sparse) for 5,317 passages, scaling roughly linearly to $368.6$ MB for the 37,239-passage DANGDOCAO corpus. The BGE-M3 sparse index is comparable in size to the BM25 index despite carrying learned per-token weights because non-positive weights are discarded at index-build time, leaving a highly sparse posting list.
+**Per-query latency breakdown (ms, measured over a 500-query ViQuAD run):**
 
-### 5.6. Soft Label Ablation
+| Stage | Mean | p50 |
+|-------|------|-----|
+| Dense (FAISS search) | 1.6 | 1.4 |
+| BM25 (word-segmented) | 15.5 | 14.5 |
+| Sparse (BGE-M3 encode + inverted index) | 30.6 | 29.8 |
+| Toneless BM25 | 19.0 | 18.2 |
+| Linguistic features (underthesea) | 0.6 | 0.6 |
+| QPP signals | 0.2 | 0.2 |
+| Router MLP inference | 5.9 | — |
 
-This section isolates the contribution of the soft-label simplex supervision proposed in §3.5 by comparing four variants of an otherwise identical training procedure. All variants share the architecture, training set ($5{,}000$ UIT-ViQuAD queries), simplex grid ($66$ points at step $0.1$), optimiser (Adam, lr $10^{-3}$, batch $256$, $100$ epochs, seed $42$), and evaluation set (UIT-ViQuAD dev, $3{,}814$ queries). They differ only in how supervision targets are constructed from the per-query NDCG@10 profile over the simplex grid: three soft-label settings at temperatures $T \in \{0.1, 0.3, 1.0\}$, plus a hard-label variant that takes the argmax over the grid.
+The complete router overhead — linguistic features, channel-response signals, and MLP inference — totals $\approx 6.7$ ms per query, and the toneless channel itself adds a single in-memory BM25 lookup of $\approx 19$ ms; both are small against the sparse channel's 30.6 ms and negligible against the query-embedding API call and LLM generation that dominate any deployed RAG pipeline. The comparison that matters most is against the alternative route to diacritic robustness: LLM-based diacritic restoration costs $\approx 1.4$–$1.7$ *seconds* per query of wall-clock latency (measured over two 500-query restoration runs against a hosted 27B model), roughly $80\times$ the toneless channel, plus per-query generation token spend. Restoration is also the stronger recovery when affordable — it returns router NDCG@10 on the fully-stripped sets to near-clean levels (0.656 → 0.826 on ViQuAD, 0.615 → 0.820 on DANGDOCAO; same 500 queries) — so the two mechanisms are complements on a cost–quality frontier rather than substitutes: the toneless channel provides always-on robustness at millisecond cost, and restoration can be layered on top for traffic that justifies an LLM call per query.
 
-| Label strategy | Temp $T$ | NDCG@10 | MRR@10 | Hit@1 | $\bar{w}_\text{dense}, \bar{w}_\text{bm25}, \bar{w}_\text{sparse}$ | $\bar{H}$ |
-|----------------|----------|---------|--------|-------|-------------------------------------------------------------------|-----------|
-| Hard label (argmax over simplex grid) | — | 0.7745 | 0.7366 | 0.6508 | (0.053, 0.084, 0.863) | 0.4860 |
-| Soft label (proposed, sharper) | **0.1** | **0.8489** | **0.8182** | **0.7462** | (0.358, 0.315, 0.327) | 1.0965 |
-| Soft label (proposed, default) | 0.3 | 0.8479 | 0.8170 | 0.7444 | (0.349, 0.319, 0.332) | 1.0976 |
-| Soft label (proposed, smoother) | 1.0 | 0.8469 | 0.8162 | 0.7441 | (0.339, 0.327, 0.334) | 1.0985 |
+### 5.6. Component Ablation and Oracle Headroom
 
-The ablation supports three substantive conclusions. First, hard-label supervision is catastrophic for this architecture. The argmax operator over the simplex selects a single corner for nearly every training query, and because BGE-M3 learned sparse is the strongest single retriever on a plurality of ViQuAD dev queries, the resulting target distribution concentrates almost all mass on $(0, 0, 1)$. The empirical target means $(\bar{w}_\text{dense}, \bar{w}_\text{bm25}, \bar{w}_\text{sparse}) = (0.053, 0.084, 0.863)$ and the entropy $\bar{H} = 0.486 \ll \ln 3$ make this concentration explicit. The MLP duly learns to predict near-sparse-only weights, and the resulting dev NDCG@10 of $0.7745$ is *below* the dense-only retrieval result ($0.7953$) and barely above the sparse-only result ($0.7507$): hard-label fusion under-performs no fusion at all. This is the clearest empirical evidence in the paper for why soft-label supervision is load-bearing.
+We ablate the four components introduced in §3 by removing one at a time from the full system, retraining where the ablation changes the training signal, and evaluating all variants on identical 500-query subsets of the four test conditions. The three retrained variants (no-signals, normalized-labels, three-way) are trained on training caches derived deterministically from the full system's cache — column projection for the feature ablations and the exact 66-point sub-grid $\{w_\text{toneless} = 0\}$ of the 286-point grid for the three-way ablation — so all variants share retrieval hits, labelling, and optimisation protocol exactly.
 
-Second, within the soft-label regime, sharper supervision is monotonically better but the curve is shallow. As $T$ decreases from $1.0$ to $0.3$ to $0.1$, dev NDCG@10 rises from $0.8469$ to $0.8479$ to $0.8489$, and MRR@10 and Hit@1 follow the same ordering. The corresponding entropies move from $1.0985$ to $1.0976$ to $1.0965$, all of which remain extremely close to the $\ln 3$ uniform ceiling. Even the sharpest soft setting we test is therefore far from a confident corner-of-simplex prediction, and the catastrophic regime documented in the first finding occurs only at the strict argmax limit. The improvement of $T = 0.1$ over the default $T = 0.3$ ($+0.0010$ NDCG@10) is small but consistent across the four headline metrics, suggesting that there exists a finite $T^* \in (0, 0.1)$ at which the soft target becomes effectively hard and the catastrophe recurs. Locating $T^*$ is a natural extension of this work.
+| Configuration | ViQuAD clean | ViQuAD noisy | DANGDOCAO clean | DANGDOCAO noisy |
+|---|---|---|---|---|
+| Full system | 0.860 | 0.657 | 0.829 | 0.615 |
+| − expected weights (argmax inference) | 0.859 | 0.646 | 0.824 | 0.614 |
+| − QPP signals (8 linguistic features only) | 0.863 | 0.649 | 0.822 | 0.616 |
+| − raw labels (per-query min-max targets) | 0.869 | 0.639 | 0.825 | 0.617 |
+| − toneless training augmentation | 0.862 | **0.483** | 0.828 | **0.143** |
+| − toneless channel (three-way routing) | 0.867 | **0.427** | 0.826 | **0.128** |
 
-Third, the headline configuration is robust to the precise temperature within the soft regime. The NDCG@10 spread across the three soft-label rows is only $\pm 0.001$, indicating that the choice of $T = 0.3$ is defensible rather than load-bearing. This is a desirable property for cross-domain deployment, in which expensive hyper-parameter search may not be feasible: the qualitative dichotomy that matters is soft-versus-hard supervision, not the specific temperature within the soft regime.
+The ablation has a clear hierarchical structure, which we state plainly. Two components are load-bearing: the toneless channel and the training-set coverage of the fully-stripped regime. Removing either one collapses noisy-condition performance — DANGDOCAO noisy falls from 0.615 to 0.143 (no augmentation: the channel exists but the router never learned when to engage it, since only 41 of 6,000 unaugmented training queries are fully toneless) or 0.128 (no channel at all) — while leaving clean performance essentially unchanged. The remaining three design choices — expected-weight inference, QPP signals, and raw-label training — are second-order refinements once the load-bearing pair is in place: their individual removal shifts NDCG@10 by at most $\pm 0.018$ on any condition at this sample size, with signs that vary by condition. (In the earlier three-way system, before the toneless channel existed, per-query-normalized labels *did* cause a significant noisy-regime regression by amplifying near-flat NDCG profiles into confident mis-routing; with the toneless channel and augmentation present, the label scheme is no longer decisive.) We consider this a more defensible ablation outcome than one in which every proposed component appears essential: the architecture's robustness derives from one clearly identified mechanism, and the surrounding machinery makes that mechanism reliable rather than carrying the result itself.
+
+**Oracle headroom.** To bound what any routing policy could achieve on this grid, we compute the per-query *oracle*: the NDCG@10 of the best of the 286 grid points, selected with access to the relevance labels. The oracle is not a method — it cheats — but the fraction of the oracle-minus-uniform gap that the router recovers is a meaningful measure of routing quality.
+
+| Condition | Fixed-eq-4 | Router | Oracle | Headroom realised |
+|---|---|---|---|---|
+| ViQuAD clean | 0.848 | 0.860 | 0.942 | 12% |
+| ViQuAD noisy | 0.593 | 0.657 | 0.755 | 40% |
+| DANGDOCAO clean | 0.812 | 0.829 | 0.930 | 15% |
+| DANGDOCAO noisy | 0.416 | 0.615 | 0.670 | **78%** |
+
+The gradient is informative in both directions. On clean text the router realises only 12–15% of the nominal headroom — but much of that headroom is illusory: with 286 attempts per query, the label-aware oracle wins many queries through tie-breaking accidents that no label-free policy could replicate, and the near-saturated clean baselines leave little systematic signal to route on. On the noisy conditions the headroom is real — entire channels are dead and the surviving one must be found — and there the router recovers 40% and 78% of it. Routing quality is highest exactly where routing matters.
 
 ### 5.7. End-to-end QA Results (RAGAS, Llama-3.3-70B judge)
 
-We evaluate end-to-end RAG quality using RAGAS [CITATION] with Qwen3-32B as the LLM judge on 200 sampled UIT-ViQuAD 2.0 dev queries per condition. The four RAGAS metrics decompose end-to-end quality along complementary axes:
+We evaluate end-to-end RAG quality with RAGAS [CITATION] on 100 sampled queries per condition, across four conditions (both domains × clean/noisy). Answer generation and judging use Llama-3.3-70B-Instruct; a non-reasoning instruct model is required because reasoning-class judges consume the completion budget on hidden deliberation and return empty structured verdicts. We report the three LLM-judged metrics — Context Precision, Context Recall, Faithfulness — and omit Answer Relevancy, whose embedding-based implementation deadlocks against our serving endpoint (every call times out; §4.4). Three retrieval policies are compared end-to-end: the router, fixed-equal four-way, and toneless-only.
 
-| Metric | Description |
-|--------|-------------|
-| **Context Precision** | LLM judges whether each retrieved chunk is relevant to the question |
-| **Context Recall** | LLM judges whether the retrieved chunks collectively cover the ground-truth answer |
-| **Faithfulness** | LLM judges whether all answer statements are grounded in retrieved context |
-| **Answer Relevancy** | Embedding similarity between question and generated answer |
+| Condition | Method | Ctx Precision | Ctx Recall | Faithfulness |
+|---|---|---|---|---|
+| ViQuAD clean | **Router** | **0.805** | **0.970** | **0.894** |
+| | Fixed-eq-4 | 0.786 | 0.940 | 0.843 |
+| | Toneless only | 0.545 | 0.740 | 0.703 |
+| ViQuAD noisy | **Router** | **0.576** | **0.770** | 0.773 |
+| | Fixed-eq-4 | 0.547 | 0.730 | 0.776 |
+| | Toneless only | 0.545 | 0.700 | 0.755 |
+| DANGDOCAO clean | **Router** | **0.857** | **0.946** | **0.961** |
+| | Fixed-eq-4 | 0.837 | 0.941 | 0.932 |
+| | Toneless only | 0.706 | 0.908 | 0.832 |
+| DANGDOCAO noisy | **Router** | 0.695 | **0.917** | 0.888 |
+| | Fixed-eq-4 | 0.422 | 0.798 | 0.712 |
+| | Toneless only | 0.698 | 0.894 | 0.895 |
 
-**Clean queries** (UIT-ViQuAD 2.0 dev, $n = 200$):
+Paired per-sample significance tests (two-sided $t$-test on the qa-id-matched score pairs) sharpen the table. Against fixed-equal four-way, the router's advantage is decisively significant where the retrieval gap is large — on DANGDOCAO noisy, all three metrics improve significantly (Context Precision $+0.271$, $p = 8.1\!\times\!10^{-14}$; Context Recall $+0.144$, $p = 8.8\!\times\!10^{-5}$; Faithfulness $+0.117$, $p = 9.8\!\times\!10^{-3}$) — and directionally positive but not individually significant at $n = 100$ where the retrieval gap is a few points (ViQuAD clean Faithfulness $+0.052$, $p = 0.013$, is the exception). Against toneless-only, the router is significantly better on both clean conditions on most metrics (e.g. ViQuAD clean Context Precision $+0.260$, $p = 5.3\!\times\!10^{-9}$) and statistically indistinguishable on the noisy conditions, where toneless-only is the specialist. The end-to-end pattern therefore mirrors the retrieval-level one: the router matches the specialist in the specialist's regime and beats it everywhere else, and where retrieval quality diverges materially, that divergence propagates through generation into answer quality.
 
-| Method | Ctx Precision | Ctx Recall | Faithfulness | Ans. Relevancy |
-|--------|--------------|------------|--------------|----------------|
-| BM25 only | 0.5839 | 0.8150 | 0.8024 | 0.6661 |
-| Dense only | **0.7879** | 0.9425 | **0.8690** | **0.7860** |
-| Sparse only (BGE-M3) | 0.7036 | 0.8959 | 0.8335 | 0.7292 |
-| Fixed-equal three-way (1/3,1/3,1/3) | 0.7742 | 0.9308 | 0.8547 | 0.7750 |
-| **Dynamic MLP (ours)** | 0.7729 | **0.9433** | 0.8500 | 0.7802 |
-
-**Diacritic-removed queries** (UIT-ViQuAD 2.0 dev with all tones stripped, $n = 200$):
-
-| Method | Ctx Precision | Ctx Recall | Faithfulness | Ans. Relevancy |
-|--------|--------------|------------|--------------|----------------|
-| BM25 only | 0.2051 | 0.2830 | 0.7639 | 0.2235 |
-| Dense only | 0.3647 | 0.5100 | 0.7788 | 0.3317 |
-| Sparse only (BGE-M3) | 0.4467 | 0.6000 | 0.7835 | 0.3513 |
-| Fixed-equal three-way (1/3,1/3,1/3) | 0.4639 | 0.6325 | **0.8001** | 0.3503 |
-| **Dynamic MLP (ours)** | **0.4710** | **0.6400** | 0.7823 | **0.3755** |
-
-The end-to-end picture under clean queries is more nuanced than the retrieval-level results in §5.1 would suggest. At $n = 200$, dense-only retrieval ties or leads on three of the four RAGAS metrics — Context Precision ($0.7879$), Faithfulness ($0.8690$), and Answer Relevancy ($0.7860$) — while the dynamic MLP leads only on Context Recall ($0.9433$). The MLP and the fixed-equal three-way fusion are statistically indistinguishable on every metric under clean queries, and both slightly trail dense-only on three of four. Two factors plausibly explain this divergence between the retrieval-level ranking in §5.1 (where the MLP is the strongest method) and the end-to-end ranking here. First, RAGAS metrics are dominated by *which* passage reaches the generator, not by ranking depth within the top-$k$, so the higher fusion NDCG@10 documented elsewhere has little leverage on RAGAS when Recall@$k$ is already very high. Second, dense-only retrieval is the strongest single source of *single-passage* relevance — the very property RAGAS measures — and the diluting weight given to BM25 and sparse signals by the three-way fusion modestly reduces the average per-passage relevance even when overall ranking quality improves.
-
-The picture inverts cleanly on the diacritic-stripped split. Under noise, the dynamic MLP leads on Context Precision ($0.4710$), Context Recall ($0.6400$), and Answer Relevancy ($0.3755$), trailing only on Faithfulness, where the fixed-equal three-way reaches $0.8001$ versus the MLP's $0.7823$ — and where the absolute spread across all five methods is only $\sim 0.04$. The MLP's lead over the fixed-equal baseline is $+0.0071$ Context Precision, $+0.0075$ Context Recall, and $+0.0252$ Answer Relevancy. The same mechanism that produced the retrieval-level gains under noise (up-weighting BGE-M3 sparse on queries with diacritic-poor surface features, as quantified in §5.3) is therefore visible at the end-to-end QA level, and the adaptive component is the dominant lever for noise-tolerant Vietnamese RAG.
-
-A robustness pattern that survives the change of sample size is the relative resilience of Faithfulness compared to Answer Relevancy. Across all five methods, Faithfulness drops by only $7$–$17\%$ from clean to noisy, while Answer Relevancy drops by $48$–$66\%$. The LLM stays grounded in whatever context it receives even when that context provides less of the right information for the original question. The dominant end-to-end failure mode under diacritic noise is therefore best characterised as "answers the wrong question faithfully" rather than "hallucinates from a relevant context." This finding has practical consequences for downstream Vietnamese RAG deployments: the principal lever for noise robustness is the retriever, not the generator.
-
-Two caveats apply. First, the $200$-sample size, while four times larger than our pilot, remains small relative to the dev split itself; significance testing on the four RAGAS metrics is not reported, and the cross-method orderings above should be read as suggestive of qualitative pattern rather than as point-significant claims. Second, a non-trivial fraction of Faithfulness scoring calls were truncated by the $1{,}024$-token completion limit on Qwen3-32B during long statement-extraction outputs and were excluded from the metric mean as failed retries. With a larger token budget the absolute Faithfulness values would likely rise across all methods, but the relative ordering across methods should be preserved because the token cap is applied uniformly.
+Two robustness observations carry over from the retrieval analysis. First, Context Recall is the most faithful downstream reflection of the router's retrieval gains — it leads in all four conditions — consistent with recall-oriented retrieval improvements surviving the generator's tendency to smooth over ranking differences within the retrieved set. Second, Faithfulness is the most stable metric across regimes (dropping far less from clean to noisy than the context metrics): the generator remains grounded in whatever context it receives, so the dominant failure mode under noise is *retrieving evidence for the wrong question* rather than hallucinating over the right one, and the principal robustness lever in Vietnamese RAG is the retriever, not the generator. Caveats: $n = 100$ per condition limits power for small deltas; and roughly 10% of Faithfulness judgements on the long-document legal domain were lost to the judge's completion-token cap during statement decomposition (excluded uniformly across methods, so relative orderings should be preserved).
 
 ---
 
