@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -E --line-buffered \"RAGAS|\\\\[OK\\\\]|\\\\[SKIP\\\\]|\\\\[FAIL\\\\]|finished|Error|error|ERROR|Traceback|FAILED|access violation|Saved →|Running RAGAS|Initializing|^\\\\[dynamic|^\\\\[fixed|^\\\\[dense|^\\\\[bm25|^\\\\[sparse|^  RAGAS scoring: 1[0-9]+|^  RAGAS scoring: 5[0-9]+|^  RAGAS scoring: 100%|\\\\\\\\[warn\\\\\\\\]|context_precision|context_recall|faithfulness|answer_relevancy\")"
+      "Bash(grep -E --line-buffered \"RAGAS|\\\\[OK\\\\]|\\\\[SKIP\\\\]|\\\\[FAIL\\\\]|finished|Error|error|ERROR|Traceback|FAILED|access violation|Saved →|Running RAGAS|Initializing|^\\\\[dynamic|^\\\\[fixed|^\\\\[dense|^\\\\[bm25|^\\\\[sparse|^  RAGAS scoring: 1[0-9]+|^  RAGAS scoring: 5[0-9]+|^  RAGAS scoring: 100%|\\\\\\\\[warn\\\\\\\\]|context_precision|context_recall|faithfulness|answer_relevancy\")",
+      "Skill(claude-api)"
     ]
   }
 }

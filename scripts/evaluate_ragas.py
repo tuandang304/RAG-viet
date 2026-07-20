@@ -32,7 +32,9 @@ import pyarrow  # noqa: F401
 
 import argparse
 import json
+import os
 import random
+import time
 import warnings
 from pathlib import Path
 
@@ -40,7 +42,10 @@ import numpy as np
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-from openai import AsyncOpenAI
+if hasattr(__import__("sys").stdout, "reconfigure"):
+    __import__("sys").stdout.reconfigure(encoding="utf-8", errors="replace")
+
+from openai import AsyncOpenAI, OpenAI
 from ragas import SingleTurnSample
 from ragas.embeddings.base import embedding_factory
 from ragas.llms import llm_factory
@@ -70,22 +75,79 @@ if TYPE_CHECKING:
     from rag_vie.retrieval.hybrid import HybridRetriever  # noqa: F401
 
 
-# ── RAGAS judge setup ──────────────────────────────────────────────────────
+# ── LLM provider setup ─────────────────────────────────────────────────────
+# Two providers supported: FPT AI Factory (default for production / main.py)
+# and MiniMax M3 (used for RAGAS pilot runs since the FPT key is exhausted).
+# Embeddings always go through FPT — MiniMax has no Vietnamese embedding.
+#
 # RAGAS 0.4.x dropped LangchainLLMWrapper / LangchainEmbeddingsWrapper for the
 # "modern" InstructorBaseRagasLLM factory. We supply a pre-built OpenAI client
-# pointing at FPT AI Factory (OpenAI-compatible API) — same credentials as the
-# rest of the pipeline use via src/rag_vie/retrieval/embedder.py.
+# — RAGAS metrics call `agenerate()` internally so a sync `OpenAI(...)` client
+# raises TypeError on every metric call.
+
+# Resolved at runtime by main() based on --llm-provider.
+_LLM_BASE_URL: str = ""
+_LLM_API_KEY: str = ""
+_LLM_MODEL: str = ""
+_LLM_DISABLE_THINKING: bool = True
+_LLM_CLIENT_OVERRIDES: dict = {}
+
+
+def _resolve_minimax_key() -> str:
+    """Resolve MiniMax key at call time. Order: --minimax-api-key flag >
+    settings.minimax_api_key > MINIMAX_API_KEY env > ANTHROPIC_AUTH_TOKEN env."""
+    if _LLM_API_KEY:
+        return _LLM_API_KEY
+    if settings.minimax_api_key:
+        return settings.minimax_api_key
+    return os.environ.get("MINIMAX_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+
 
 def _fpt_async_client() -> AsyncOpenAI:
-    """Async OpenAI client pointed at FPT — required because ragas metrics
-    call `agenerate()` internally on the supplied LLM/embedding clients.
-    A sync `OpenAI(...)` client raises TypeError on every metric call."""
     return AsyncOpenAI(api_key=settings.fpt_api_key, base_url=settings.fpt_base_url)
 
 
+def _minimax_async_client() -> AsyncOpenAI:
+    key = _resolve_minimax_key()
+    if not key:
+        raise RuntimeError(
+            "MiniMax API key not found. Set MINIMAX_API_KEY (or ANTHROPIC_AUTH_TOKEN) "
+            "in your environment, or pass --minimax-api-key, or add it to .env."
+        )
+    return AsyncOpenAI(api_key=key, base_url=_LLM_BASE_URL or settings.minimax_base_url)
+
+
+def _minimax_sync_client() -> OpenAI:
+    key = _resolve_minimax_key()
+    if not key:
+        raise RuntimeError(
+            "MiniMax API key not found. Set MINIMAX_API_KEY (or ANTHROPIC_AUTH_TOKEN) "
+            "in your environment, or pass --minimax-api-key, or add it to .env."
+        )
+    return OpenAI(api_key=key, base_url=_LLM_BASE_URL or settings.minimax_base_url)
+
+
 def make_ragas_llm():
+    """Build the RAGAS LLM judge for the selected provider."""
+    if _LLM_BASE_URL:  # explicit MiniMax (or override)
+        # llm_factory merges **kwargs into model_args, which is splatted into
+        # `chat.completions.create(**provider_kwargs)` — so extra_body flows
+        # through and the OpenAI client merges it into the request body sent
+        # to MiniMax. Without this, M3 always emits a `<think>` block before
+        # the structured judge answer, wasting ~10x tokens and confusing
+        # instructor's Pydantic parser.
+        extra = {"extra_body": {"thinking": {"type": "disabled"}}} if _LLM_DISABLE_THINKING else {}
+        return llm_factory(
+            model=_LLM_MODEL or settings.minimax_llm_model,
+            provider="openai",
+            client=_minimax_async_client(),
+            temperature=0.0,
+            max_tokens=1024,
+            **extra,
+        )
+    # Default: FPT (back-compat with earlier RAGAS runs)
     return llm_factory(
-        model=settings.fpt_llm_model,
+        model=_LLM_MODEL or settings.fpt_llm_model,
         provider="openai",
         client=_fpt_async_client(),
         temperature=0.0,
@@ -94,11 +156,59 @@ def make_ragas_llm():
 
 
 def make_ragas_embeddings():
+    """Embeddings always go through FPT (MiniMax has no Vietnamese embedding)."""
     return embedding_factory(
         provider="openai",
         model=settings.fpt_embedding_model,
         client=_fpt_async_client(),
     )
+
+
+# ── MiniMax answer generator (used when --llm-provider minimax) ─────────────
+
+_GEN_SYSTEM = (
+    "Bạn là trợ lý AI hữu ích. Dựa vào các đoạn văn được cung cấp, "
+    "hãy trả lời câu hỏi bằng tiếng Việt một cách chính xác và súc tích. "
+    "Nếu không tìm thấy thông tin trong đoạn văn, hãy nói rõ điều đó."
+)
+
+
+def _generate_answer_minimax(query: str, passages: list[str], max_tokens: int = 512) -> str:
+    """Generate an answer via MiniMax-M3 (OpenAI-compatible). Retries with
+    exponential backoff on transient 5xx/429 (MiniMax proxies through CDN — same
+    transient pattern as FPT in src/rag_vie/retrieval/embedder.py)."""
+    context = "\n\n".join(f"[{i+1}] {p}" for i, p in enumerate(passages))
+    user_message = f"Ngữ cảnh:\n{context}\n\nCâu hỏi: {query}"
+    client = _minimax_sync_client()
+    kwargs: dict = {"model": _LLM_MODEL or settings.minimax_llm_model,
+                    "messages": [{"role": "system", "content": _GEN_SYSTEM},
+                                 {"role": "user", "content": user_message}],
+                    "max_tokens": max_tokens, "temperature": 0.1}
+    if _LLM_DISABLE_THINKING:
+        # M3 is a reasoning model; `thinking` is a non-OpenAI-standard field that
+        # the MiniMax server merges at the top of the request body. OpenAI's
+        # client rejects unknown kwargs, so it has to go through `extra_body`.
+        # Without this the response always begins with `<think>...</think>` and
+        # wastes ~10x completion tokens.
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
+    last_exc: Exception | None = None
+    for attempt in range(5):
+        try:
+            r = client.chat.completions.create(**kwargs)
+            content = r.choices[0].message.content or ""
+            # Belt-and-braces: strip a leading <think> block if the server
+            # ignores the disable flag (catches regressions silently).
+            if "<think>" in content and "</think>" in content:
+                content = content.split("</think>", 1)[1].strip()
+            return content
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            wait = 2 ** attempt
+            print(f"    [minimax gen] {type(exc).__name__} — retry {attempt + 1}/5 in {wait}s",
+                  flush=True)
+            time.sleep(wait)
+    raise last_exc if last_exc else RuntimeError("minimax gen unreachable")
 
 
 # ── Retrieval helpers ──────────────────────────────────────────────────────
@@ -171,7 +281,8 @@ def build_samples(
             if not contexts:
                 continue
 
-            answer = generate(query, contexts[:5])  # top-5 for generation
+            answer = (_generate_answer_minimax(query, contexts[:5])
+                      if _LLM_BASE_URL else generate(query, contexts[:5]))  # top-5 for generation
         except Exception as e:
             print(f"    [warn] sample skipped ({type(e).__name__}): {e}", flush=True)
             continue
@@ -237,32 +348,49 @@ def evaluate_method(
 
     # A single ragas metric.score() call can stall indefinitely (network hiccup
     # or the internal instructor loop retrying a malformed structured output).
-    # Run each in a throwaway single-thread executor and abandon it on timeout —
-    # one bad sample must not hang a multi-hour evaluation.
-    from concurrent.futures import ThreadPoolExecutor
-    from concurrent.futures import TimeoutError as FutureTimeout
+    #
+    # Concurrency model: ONE event loop per sample, run all metrics as
+    # concurrent asyncio tasks via asyncio.gather on each metric's ascore().
+    # Calling metric.score() (which wraps asyncio.run(ascore())) from multiple
+    # threads DEADLOCKS because every thread tries to spin up its own event
+    # loop while sharing the AsyncOpenAI client — the loop never closes cleanly.
+    # Using ascore() directly in a single loop is the only safe concurrency path.
+    import asyncio
 
-    def _score_with_timeout(metric, kwargs, timeout: float = 120.0):
-        ex = ThreadPoolExecutor(max_workers=1)
-        try:
-            return ex.submit(lambda: metric.score(**kwargs)).result(timeout=timeout)
-        finally:
-            ex.shutdown(wait=False)   # don't block on an abandoned hung call
+    async def _score_all(s: SingleTurnSample) -> dict[str, float | None]:
+        tasks = {name: asyncio.create_task(metric.ascore(**_kw_for(name, s)),
+                                           name=f"{name}-sample")
+                 for name, metric in metric_objs}
+        results: dict[str, float | None] = {}
+        for name, task in tasks.items():
+            try:
+                r = await asyncio.wait_for(task, timeout=180.0)
+                val = getattr(r, "value", None)
+                if val is not None and not (isinstance(val, float) and val != val):
+                    results[name] = float(val)
+                else:
+                    results[name] = None
+            except asyncio.TimeoutError:
+                print(f"    [warn] {name} timed out on a sample — skipped", flush=True)
+                results[name] = None
+            except Exception as e:  # noqa: BLE001
+                print(f"    [warn] {name} failed on a sample: {type(e).__name__}: {e}",
+                      flush=True)
+                results[name] = None
+        return results
 
     for s in tqdm(samples, desc="  RAGAS scoring"):
-        for name, metric in metric_objs:
-            val_to_record: float | None = None
-            try:
-                result = _score_with_timeout(metric, _kw_for(name, s))
-                val = getattr(result, "value", None)
-                if val is not None and not (isinstance(val, float) and val != val):
-                    val_to_record = float(val)
-                    scores[name].append(val_to_record)
-            except FutureTimeout:
-                print(f"    [warn] {name} timed out on a sample — skipped", flush=True)
-            except Exception as e:
-                print(f"    [warn] {name} failed on a sample: {type(e).__name__}: {e}", flush=True)
-            per_sample[name].append(val_to_record)
+        try:
+            per_metric = asyncio.run(_score_all(s))
+        except Exception as e:  # noqa: BLE001
+            print(f"    [warn] sample scoring crashed: {type(e).__name__}: {e}",
+                  flush=True)
+            per_metric = {n: None for n, _ in metric_objs}
+        for name, _ in metric_objs:
+            v = per_metric.get(name)
+            if v is not None:
+                scores[name].append(v)
+            per_sample[name].append(v)
 
     means = {
         name: round(sum(vals) / len(vals), 4) if vals else float("nan")
@@ -273,6 +401,14 @@ def evaluate_method(
 
 # ── Main ──────────────────────────────────────────────────────────────────
 
+def _save_partial(path: Path, payload: dict) -> None:
+    """Atomic JSON write so a crash mid-method doesn't corrupt the result file."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    tmp.replace(path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--qas-path",    required=True)
@@ -280,7 +416,9 @@ def main() -> None:
     parser.add_argument("--passages-path", default=None,
                         help="Passages JSONL (default: inferred from index-dir name)")
     parser.add_argument("--mlp-path",    required=True)
-    parser.add_argument("--n-samples",   type=int, default=50)
+    parser.add_argument("--n-samples",   type=int, default=0,
+                        help="Number of QA samples to evaluate (0 = use ALL). "
+                             "Defaults to 0 (full eval); was 50 in the original pilot.")
     parser.add_argument("--top-k",       type=int, default=10)
     parser.add_argument("--methods",     default="dynamic_mlp,fixed_equal_4,toneless_only,dense_only",
                         help="Comma-separated methods to evaluate")
@@ -290,10 +428,23 @@ def main() -> None:
                         help="Disable sparse retriever (run 2-way only)")
     parser.add_argument("--no-toneless", action="store_true",
                         help="Skip the toneless BM25 channel even when bm25_toneless.pkl exists")
-    parser.add_argument("--judge-model", default="Llama-3.3-70B-Instruct",
-                        help="LLM for answer generation + RAGAS judging. Default is a "
-                             "non-reasoning instruct model — reasoning models burn the "
-                             "token budget on thinking and return empty judgements.")
+    parser.add_argument("--llm-provider", default="minimax",
+                        choices=["fpt", "minimax"],
+                        help="LLM provider for answer generation + RAGAS judge. "
+                             "Embeddings always go through FPT.")
+    parser.add_argument("--judge-model", default=None,
+                        help="Override the LLM model name. Default: MiniMax-M3 "
+                             "(when --llm-provider minimax) or settings.fpt_llm_model.")
+    parser.add_argument("--minimax-base-url", default=None,
+                        help="Override MiniMax base URL (default: settings.minimax_base_url)")
+    parser.add_argument("--minimax-api-key",  default=None,
+                        help="Override MiniMax API key (default: settings.minimax_api_key "
+                             "→ ANTHROPIC_AUTH_TOKEN env)")
+    parser.add_argument("--disable-thinking", action="store_true", default=True,
+                        help="Send thinking={type:disabled} to suppress <think> blocks "
+                             "(default ON for MiniMax M3 — reasoning model).")
+    parser.add_argument("--no-disable-thinking", dest="disable_thinking",
+                        action="store_false")
     parser.add_argument("--ragas-metrics",
                         default="context_precision,context_recall,faithfulness",
                         help="Comma-separated RAGAS metrics. answer_relevancy is excluded "
@@ -304,11 +455,29 @@ def main() -> None:
                         help="Path to a JSON list of QA ids to exclude from sampling. "
                              "Used by extend-to-N orchestrators to skip queries "
                              "already evaluated in an earlier run.")
+    parser.add_argument("--resume-from", default=None,
+                        help="Path to a partial result JSON; methods listed in its "
+                             "completed_methods field are skipped. Combined with "
+                             "--output, partial progress is saved after each method.")
     args = parser.parse_args()
 
-    # Both answer generation (generator/llm.py) and the RAGAS judge read
-    # settings.fpt_llm_model — point them at the non-reasoning judge model.
-    settings.fpt_llm_model = args.judge_model
+    # ── Resolve LLM provider + model ────────────────────────────────────────
+    global _LLM_BASE_URL, _LLM_API_KEY, _LLM_MODEL, _LLM_DISABLE_THINKING
+    if args.llm_provider == "minimax":
+        _LLM_BASE_URL = args.minimax_base_url or settings.minimax_base_url
+        _LLM_API_KEY = args.minimax_api_key or settings.minimax_api_key
+        _LLM_MODEL = args.judge_model or settings.minimax_llm_model
+        _LLM_DISABLE_THINKING = args.disable_thinking
+    else:  # fpt
+        _LLM_BASE_URL = ""           # signals FPT path
+        _LLM_API_KEY = ""
+        _LLM_MODEL = args.judge_model or settings.fpt_llm_model
+        settings.fpt_llm_model = _LLM_MODEL
+        _LLM_DISABLE_THINKING = False  # FPT models are non-reasoning
+
+    provider_label = (f"{args.llm_provider}/{_LLM_MODEL} @ {_LLM_BASE_URL}"
+                      if _LLM_BASE_URL else f"{args.llm_provider}/{_LLM_MODEL} via FPT")
+    print(f"LLM provider: {provider_label} | thinking={'off' if _LLM_DISABLE_THINKING else 'on'}")
 
     random.seed(args.seed)
 
@@ -326,7 +495,7 @@ def main() -> None:
         print(f"Excluded {before - len(qas)} previously-evaluated qa_ids "
               f"(from {args.exclude_ids}); {len(qas)} remain.")
 
-    if args.n_samples < len(qas):
+    if args.n_samples and args.n_samples < len(qas):
         qas = random.sample(qas, args.n_samples)
     print(f"Evaluating {len(qas)} samples with RAGAS")
 
@@ -380,20 +549,37 @@ def main() -> None:
 
     # RAGAS judge
     ragas_metric_names = [m.strip() for m in args.ragas_metrics.split(",") if m.strip()]
-    print(f"Initializing RAGAS judge ({args.judge_model} via FPT); metrics={ragas_metric_names}")
+    print(f"Initializing RAGAS judge ({_LLM_MODEL} via {args.llm_provider}); "
+          f"metrics={ragas_metric_names}")
     ragas_llm = make_ragas_llm()
     ragas_emb = make_ragas_embeddings()
 
+    # ── Resume from partial file ────────────────────────────────────────────
+    out_path = Path(args.output) if args.output else None
+    completed: list[str] = []
+    all_results: dict[str, dict] = {}
+    per_sample_all: dict[str, dict] = {}
+    base_payload: dict = {}
+    if args.resume_from and Path(args.resume_from).exists():
+        prev = json.loads(Path(args.resume_from).read_text(encoding="utf-8"))
+        completed = list(prev.get("completed_methods", []))
+        all_results = dict(prev.get("results", {}))
+        per_sample_all = dict(prev.get("per_sample", {}))
+        base_payload = {k: v for k, v in prev.items()
+                        if k not in {"results", "per_sample", "completed_methods"}}
+        print(f"Resuming: {len(completed)} method(s) already done "
+              f"({', '.join(completed)})")
+
     # Evaluate each method
     selected_methods = [m.strip() for m in args.methods.split(",")]
-    all_results: dict[str, dict] = {}
-
-    per_sample_all: dict[str, dict] = {}
-
     for method in selected_methods:
         if method not in methods:
             print(f"Unknown method '{method}', skipping")
             continue
+        if method in completed:
+            print(f"\n[{method}] already done — skipping (resume)")
+            continue
+
         fixed_w = methods.get(method)
         use_mlp = (fixed_w is None and method == "dynamic_mlp")
 
@@ -413,7 +599,23 @@ def main() -> None:
         metrics, per_sample = evaluate_method(samples, ragas_llm, ragas_emb, ragas_metric_names)
         all_results[method] = metrics
         per_sample_all[method] = {"qa_ids": sample_ids, "scores": per_sample}
+        completed.append(method)
         print(f"  {metrics}")
+
+        # ── Incremental save after each method ──────────────────────────────
+        if out_path:
+            payload = {**base_payload,
+                       "results":    all_results,
+                       "n_samples":  len(qas),
+                       "qas_path":   args.qas_path,
+                       "seed":       args.seed,
+                       "per_sample": per_sample_all,
+                       "completed_methods": completed,
+                       "llm_provider": args.llm_provider,
+                       "judge_model": _LLM_MODEL}
+            _save_partial(out_path, payload)
+            print(f"  [saved partial] {out_path}  ({len(completed)} method(s))",
+                  flush=True)
 
     # Print summary table
     if all_results:
@@ -426,17 +628,8 @@ def main() -> None:
             row = f"{method:<20}" + "".join(f"  {m[k]:>16.4f}" for k in metric_names)
             print(row)
 
-    if args.output:
-        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            json.dump({
-                "results":    all_results,
-                "n_samples":  len(qas),
-                "qas_path":   args.qas_path,
-                "seed":       args.seed,
-                "per_sample": per_sample_all,
-            }, f, indent=2, ensure_ascii=False)
-        print(f"\nSaved → {args.output}")
+    if out_path:
+        print(f"\nFinal result → {out_path}  ({len(completed)}/{len(selected_methods)} methods)")
 
 
 if __name__ == "__main__":
