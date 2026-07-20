@@ -27,6 +27,20 @@ class RAGResult:
     answer: str
 
 
+# Fixed-weight baselines from the paper, in (w_dense, w_bm25, w_sparse, w_toneless)
+# order. `None` means "use the MLP's dynamic per-query weights" — see
+# RAGPipeline.compare(). Kept here (not in evaluate_all.py) so the API/UI and
+# the offline evaluation script can't drift apart on what "fixed_equal" means.
+BASELINE_METHODS: dict[str, tuple[float, ...] | None] = {
+    "mlp":         None,
+    "fixed_equal": (1 / 3, 1 / 3, 1 / 3, 0.0),
+    "dense_bm25":  (0.5, 0.5, 0.0, 0.0),
+    "dense":       (1.0, 0.0, 0.0, 0.0),
+    "bm25":        (0.0, 1.0, 0.0, 0.0),
+    "sparse":      (0.0, 0.0, 1.0, 0.0),
+}
+
+
 class RAGPipeline:
     """End-to-end Dynamic Hybrid RAG — dynamic fusion over dense + BM25 +
     sparse (+ optional toneless BM25 channel for tone-robust retrieval)."""
@@ -47,15 +61,7 @@ class RAGPipeline:
         self._neural_extractor = neural_extractor
         self._bm25_vocab: set[str] | None = bm25.vocab
 
-    def run(self, query: str) -> RAGResult:
-        # Retrieve all channels first — fusion needs the hits anyway, and
-        # checkpoints trained with post-retrieval signals need them as input.
-        hits = self._hybrid.search_all(
-            query,
-            k_dense=settings.top_k_dense,
-            k_bm25=settings.top_k_bm25,
-        )
-
+    def _predict_mlp_weights(self, query: str, hits: dict[str, list]) -> tuple[float, ...]:
         features = extract_features(
             query,
             bm25_vocab=self._bm25_vocab,
@@ -73,8 +79,17 @@ class RAGPipeline:
                 ),
             )
             features = np.concatenate([features, signals])
+        return self._mlp.predict_weights(features)   # (a, b, c[, d])
 
-        weights = self._mlp.predict_weights(features)   # (a, b, c[, d])
+    def run(self, query: str) -> RAGResult:
+        # Retrieve all channels first — fusion needs the hits anyway, and
+        # checkpoints trained with post-retrieval signals need them as input.
+        hits = self._hybrid.search_all(
+            query,
+            k_dense=settings.top_k_dense,
+            k_bm25=settings.top_k_bm25,
+        )
+        weights = self._predict_mlp_weights(query, hits)
         retrieved = self._hybrid.fuse(hits, weights, k_final=settings.top_k_final)
 
         answer = ""
@@ -83,6 +98,44 @@ class RAGPipeline:
             answer = generate(query, passages)
 
         return RAGResult(query=query, weights=weights, retrieved=retrieved, answer=answer)
+
+    def compare(
+        self,
+        query: str,
+        methods: dict[str, tuple[float, ...] | None] | None = None,
+        generate_for: set[str] | None = None,
+    ) -> dict[str, RAGResult]:
+        """Run one query through several fusion methods, sharing a single retrieval pass.
+
+        `methods` maps a name to fixed (w_dense, w_bm25, w_sparse[, w_toneless])
+        weights, or None to use the MLP's dynamic per-query weights — defaults to
+        BASELINE_METHODS (the same fixed baselines evaluate_all.py reports against).
+        `generate_for` restricts which methods pay for an LLM call (defaults to
+        {"mlp"}: retrieval quality is what differs between methods, so there's no
+        need to regenerate an answer per baseline).
+        """
+        methods = BASELINE_METHODS if methods is None else methods
+        generate_for = {"mlp"} if generate_for is None else generate_for
+
+        hits = self._hybrid.search_all(
+            query,
+            k_dense=settings.top_k_dense,
+            k_bm25=settings.top_k_bm25,
+        )
+        mlp_weights = self._predict_mlp_weights(query, hits)
+
+        results: dict[str, RAGResult] = {}
+        for name, weights in methods.items():
+            w = mlp_weights if weights is None else weights
+            retrieved = self._hybrid.fuse(hits, w, k_final=settings.top_k_final)
+
+            answer = ""
+            if self._use_generator and name in generate_for:
+                passages = [p for _, p, _ in retrieved]
+                answer = generate(query, passages)
+
+            results[name] = RAGResult(query=query, weights=w, retrieved=retrieved, answer=answer)
+        return results
 
 
 def main() -> None:
