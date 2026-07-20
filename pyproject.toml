@@ -24,6 +24,8 @@ dependencies = [
     "tensorflow>=2.20.0",
     "transformers>=4.45.0,<5.0.0",
     "tf-keras>=2.21.0",
+    "fastapi>=0.139.2",
+    "uvicorn[standard]>=0.51.0",
 ]
 
 [project.scripts]

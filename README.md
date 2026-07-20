@@ -274,6 +274,35 @@ uv run python main.py \
 
 ---
 
+## Web UI (testing console)
+
+A minimal FastAPI + vanilla-JS UI for interactively testing queries against a
+built index, without the CLI. It reads `INDEX_DIR` / `CHECKPOINT_DIR` from
+`.env` (same as every other script) and lists what it finds there — if the
+index/checkpoint files live on another machine, mount or copy them locally
+first (or point `INDEX_DIR` at a shared path).
+
+```bash
+uv run uvicorn rag_vie.api.app:app --reload
+```
+
+Open http://127.0.0.1:8000 — pick an index dir / MLP checkpoint (autodetected
+from `indexes/` and `checkpoints/`), enter a query, and inspect the fused
+weights, retrieved passages, and generated answer. `GET /api/health` and
+`GET /api/indexes` are plain JSON if you just want to probe the backend.
+
+**So sánh phương pháp** (`POST /api/compare`) runs one query through the MLP
+router and every fixed-weight baseline from the paper (`fixed_equal`,
+`dense_bm25`, `dense`, `bm25`, `sparse`) off a single shared retrieval pass —
+only the MLP result calls the LLM generator, so comparing costs one API call
+instead of six. The UI marks passages a baseline shares with the MLP's top-5.
+
+Every run (single-query or comparison) is saved to a **session history**
+sidebar (browser `localStorage`, last 30 entries) — click an entry to restore
+the query, config, and cached result without re-running it.
+
+---
+
 ## Project Structure
 
 ```
@@ -294,6 +323,11 @@ RAG-viet/
 │   │   └── mlp.py              # FusionMLP (Keras) — Grid NDCG Predictor, 66-point simplex argmax
 │   ├── generator/
 │   │   └── llm.py              # Qwen3-32B via FPT chat/completions
+│   ├── api/                    # FastAPI testing UI (uv run uvicorn rag_vie.api.app:app)
+│   │   ├── app.py              # Routes: /api/health, /api/indexes, /api/query + static UI
+│   │   ├── service.py          # PipelineManager — lazy-loads & caches RAGPipeline per index/checkpoint
+│   │   ├── schemas.py          # Request/response Pydantic models
+│   │   └── static/             # index.html + app.js + style.css (vanilla JS, no build step)
 │   ├── datagen/                # LLM-based noise generation (Ollama + FPT validation)
 │   │   ├── prompts.py          # 4 noise types: missing_tone, typo_telex, informal, code_switch
 │   │   ├── generate_noise.py   # python -m rag_vie.datagen.generate_noise

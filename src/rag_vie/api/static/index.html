@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RAG_vie — Testing UI</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>RAG_vie <span class="subtitle">Dynamic Hybrid RAG — testing console</span></h1>
+    <div id="healthDot" class="health-dot" title="API health">•</div>
+  </header>
+
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <h2>Lịch sử</h2>
+        <button id="clearHistory" class="link-btn" type="button">Xoá hết</button>
+      </div>
+      <ul id="historyList" class="history-list"></ul>
+      <p id="historyEmpty" class="hint">Chưa có truy vấn nào trong phiên này.</p>
+    </aside>
+
+    <main class="layout">
+      <section class="panel config-panel">
+        <h2>Cấu hình</h2>
+
+        <label for="indexDir">Index directory</label>
+        <input list="indexDirList" id="indexDir" placeholder="indexes/viaquad" />
+        <datalist id="indexDirList"></datalist>
+
+        <label for="mlpPath">MLP checkpoint</label>
+        <input list="mlpPathList" id="mlpPath" placeholder="checkpoints/fusion_mlp_multidomain.keras" />
+        <datalist id="mlpPathList"></datalist>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="useGenerator" checked />
+          Sinh câu trả lời (LLM generator)
+        </label>
+
+        <div id="configHint" class="hint"></div>
+        <button id="refreshConfig" class="secondary" type="button">Làm mới danh sách</button>
+      </section>
+
+      <section class="panel query-panel">
+        <h2>Truy vấn</h2>
+        <textarea id="queryInput" rows="3" placeholder="Nhập câu hỏi tiếng Việt…"></textarea>
+        <div class="actions">
+          <button id="submitQuery" type="button">Chạy truy vấn</button>
+          <button id="submitCompare" class="secondary" type="button">So sánh phương pháp</button>
+          <span id="latency" class="latency"></span>
+        </div>
+        <div id="errorBox" class="error-box" hidden></div>
+      </section>
+
+      <section class="panel results-panel" id="resultsPanel" hidden>
+        <h2>Kết quả</h2>
+
+        <div class="weights-block">
+          <h3>Trọng số fusion</h3>
+          <div id="weightsBars" class="weights-bars"></div>
+        </div>
+
+        <div class="answer-block">
+          <h3>Câu trả lời</h3>
+          <p id="answerText" class="answer-text"></p>
+        </div>
+
+        <div class="passages-block">
+          <h3>Đoạn văn được truy hồi</h3>
+          <ol id="passagesList" class="passages-list"></ol>
+        </div>
+      </section>
+
+      <section class="panel compare-panel" id="comparePanel" hidden>
+        <h2>So sánh phương pháp fusion</h2>
+        <p class="hint">
+          Cùng một lượt truy hồi (dense/BM25/sparse) được fuse lại với trọng số khác nhau cho mỗi phương pháp.
+          Chỉ <strong>Dynamic MLP</strong> gọi LLM sinh câu trả lời — các baseline chỉ so sánh chất lượng truy hồi.
+          Đoạn văn trùng với top-5 của MLP được đánh dấu <span class="match-dot"></span>.
+        </p>
+        <div id="compareTable" class="compare-table"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
