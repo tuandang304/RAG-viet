@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(grep -E --line-buffered \"RAGAS|\\\\[OK\\\\]|\\\\[SKIP\\\\]|\\\\[FAIL\\\\]|finished|Error|error|ERROR|Traceback|FAILED|access violation|Saved →|Running RAGAS|Initializing|^\\\\[dynamic|^\\\\[fixed|^\\\\[dense|^\\\\[bm25|^\\\\[sparse|^  RAGAS scoring: 1[0-9]+|^  RAGAS scoring: 5[0-9]+|^  RAGAS scoring: 100%|\\\\\\\\[warn\\\\\\\\]|context_precision|context_recall|faithfulness|answer_relevancy\")",
-      "Skill(claude-api)"
+      "Skill(claude-api)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'docs: spec for 4-way router UI refresh + explainability *)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE OMP_NUM_THREADS=1 uv run *)"
     ]
   }
 }

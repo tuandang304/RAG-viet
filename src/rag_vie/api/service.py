@@ -48,6 +48,11 @@ class PipelineManager:
         return sorted(f.name for f in base.glob("*.keras"))
 
     def default_mlp_path(self) -> str:
+        # Prefer the 4-way checkpoint (dense+bm25+sparse+toneless) so the demo
+        # exercises all four channels; fall back to the 3-way model if absent.
+        four_way = f"{settings.checkpoint_dir}/fusion_mlp_4way_aug.keras"
+        if Path(four_way).exists():
+            return four_way
         return f"{settings.checkpoint_dir}/fusion_mlp_multidomain.keras"
 
     def get_pipeline(self, index_dir: str, mlp_path: str, use_generator: bool) -> RAGPipeline:

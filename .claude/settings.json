@@ -1,11 +1,8 @@
 {
-  "env": {
-    "ANTHROPIC_BASE_URL": "https://api.minimax.io/anthropic",
-    "ANTHROPIC_AUTH_TOKEN": "sk-cp-nBzd3WeB_s7Bs0lgLOrotVuDCo_Sia8i71JGjhwV31dODkdizfOLZltrnK7U97WZCdGRrYpZrdWfMflEqbPo4fW8JODjcwWsd_aUpZFjWRAzqq530L5kzuE",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
-    "ANTHROPIC_MODEL": "MiniMax-M3[1m]",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "MiniMax-M3[1m]",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "MiniMax-M3[1m]",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "MiniMax-M3[1m]"
+  "permissions": {
+    "allow": [
+      "Bash(grep -E --line-buffered \"RAGAS|\\\\[OK\\\\]|\\\\[SKIP\\\\]|\\\\[FAIL\\\\]|finished|Error|error|ERROR|Traceback|FAILED|access violation|Saved →|Running RAGAS|Initializing|^\\\\[dynamic|^\\\\[fixed|^\\\\[dense|^\\\\[bm25|^\\\\[sparse|^  RAGAS scoring: 1[0-9]+|^  RAGAS scoring: 5[0-9]+|^  RAGAS scoring: 100%|\\\\\\\\[warn\\\\\\\\]|context_precision|context_recall|faithfulness|answer_relevancy\")",
+      "Skill(claude-api)"
+    ]
   }
 }

@@ -1,15 +1,22 @@
 <!doctype html>
-<html lang="vi">
+<html lang="vi" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>RAG_vie — Testing UI</title>
+  <meta name="description" content="Dynamic Hybrid RAG for Vietnamese — interactive testing and demo console" />
+  <title>RAG_vie — Testing Console</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <header class="topbar">
-    <h1>RAG_vie <span class="subtitle">Dynamic Hybrid RAG — testing console</span></h1>
-    <div id="healthDot" class="health-dot" title="API health">•</div>
+    <h1>
+      <span class="topbar-logo">RAG_vie</span>
+      <span class="subtitle">Dynamic Hybrid RAG — Testing Console</span>
+    </h1>
+    <div class="topbar-right">
+      <div id="healthDot" class="health-dot" title="API health"></div>
+      <button id="themeToggle" class="theme-toggle" type="button" title="Toggle theme">🌙</button>
+    </div>
   </header>
 
   <div class="shell">
@@ -19,71 +26,119 @@
         <button id="clearHistory" class="link-btn" type="button">Xoá hết</button>
       </div>
       <ul id="historyList" class="history-list"></ul>
-      <p id="historyEmpty" class="hint">Chưa có truy vấn nào trong phiên này.</p>
+      <p id="historyEmpty" class="hint">Chưa có truy vấn nào.</p>
     </aside>
 
     <main class="layout">
-      <section class="panel config-panel">
-        <h2>Cấu hình</h2>
-
-        <label for="indexDir">Index directory</label>
-        <input list="indexDirList" id="indexDir" placeholder="indexes/viaquad" />
-        <datalist id="indexDirList"></datalist>
-
-        <label for="mlpPath">MLP checkpoint</label>
-        <input list="mlpPathList" id="mlpPath" placeholder="checkpoints/fusion_mlp_multidomain.keras" />
-        <datalist id="mlpPathList"></datalist>
-
-        <label class="checkbox-row">
-          <input type="checkbox" id="useGenerator" checked />
-          Sinh câu trả lời (LLM generator)
-        </label>
-
-        <div id="configHint" class="hint"></div>
-        <button id="refreshConfig" class="secondary" type="button">Làm mới danh sách</button>
+      <!-- Config -->
+      <section class="panel config-panel" id="configSection">
+        <h2>⚙ Cấu hình</h2>
+        <div class="config-grid">
+          <div>
+            <label for="indexDir">Index directory</label>
+            <select id="indexDir"></select>
+          </div>
+          <div>
+            <label for="mlpPath">MLP checkpoint</label>
+            <select id="mlpPath"></select>
+          </div>
+        </div>
+        <div class="config-footer">
+          <label class="toggle-row">
+            <input type="checkbox" id="useGenerator" class="toggle-switch" checked />
+            Sinh câu trả lời (LLM)
+          </label>
+          <button id="refreshConfig" class="btn-secondary" type="button">↻ Làm mới</button>
+        </div>
+        <div id="configHint" class="config-hint"></div>
       </section>
 
-      <section class="panel query-panel">
-        <h2>Truy vấn</h2>
+      <!-- Query -->
+      <section class="panel query-panel" id="queryPanel">
+        <h2>🔍 Truy vấn</h2>
+        <div class="sample-queries" id="sampleQueries">
+          <button class="sample-btn" type="button" data-query="Thủ đô của Việt Nam là gì?">🏛 Thủ đô Việt Nam</button>
+          <button class="sample-btn" type="button" data-query="thu do cua nuoc viet nam ten la gi">🚫 Mất dấu (toneless)</button>
+          <button class="sample-btn" type="button" data-query="Internet và website bắt đầu phổ biến ở Việt Nam khi nào?">🌐 Code-switch</button>
+          <button class="sample-btn" type="button" data-query="Ai là người sáng lập ra Đảng Cộng sản Việt Nam?">👤 Sáng lập Đảng</button>
+          <button class="sample-btn" type="button" data-query="Luật lao động quy định về thời gian làm việc như thế nào?">⚖️ Luật lao động</button>
+        </div>
         <textarea id="queryInput" rows="3" placeholder="Nhập câu hỏi tiếng Việt…"></textarea>
         <div class="actions">
-          <button id="submitQuery" type="button">Chạy truy vấn</button>
-          <button id="submitCompare" class="secondary" type="button">So sánh phương pháp</button>
+          <button id="submitQuery" class="btn-primary" type="button">▶ Chạy truy vấn</button>
+          <button id="submitCompare" class="btn-secondary" type="button">⇄ So sánh phương pháp</button>
+          <button id="deaccentQuery" class="btn-secondary" type="button"
+                  title="Bỏ dấu câu hỏi hiện tại rồi chạy lại — xem router dồn trọng số sang kênh toneless">🚫 Bỏ dấu &amp; chạy lại</button>
           <span id="latency" class="latency"></span>
+          <span class="kbd" title="Ctrl+Enter để chạy">Ctrl ↵</span>
         </div>
         <div id="errorBox" class="error-box" hidden></div>
       </section>
 
+      <!-- Single-query results -->
       <section class="panel results-panel" id="resultsPanel" hidden>
-        <h2>Kết quả</h2>
+        <h2>📊 Kết quả</h2>
 
+        <!-- Router explainability: what the router saw (input) -->
+        <div class="features-block">
+          <div class="block-head">
+            <h3>🧠 Router nhìn thấy gì</h3>
+            <span class="block-sub">8 đặc trưng ngôn ngữ → quyết định trọng số bên dưới</span>
+          </div>
+          <div id="featuresBars" class="features-bars"></div>
+        </div>
+
+        <!-- Router decision: fusion weights (output) -->
         <div class="weights-block">
-          <h3>Trọng số fusion</h3>
+          <div class="block-head">
+            <h3>Trọng số fusion</h3>
+            <div class="channel-legend">
+              <span class="legend-item"><span class="legend-dot dense"></span>dense</span>
+              <span class="legend-item"><span class="legend-dot bm25"></span>bm25</span>
+              <span class="legend-item"><span class="legend-dot sparse"></span>sparse</span>
+              <span class="legend-item"><span class="legend-dot toneless"></span>toneless</span>
+            </div>
+          </div>
           <div id="weightsBars" class="weights-bars"></div>
+          <div id="weightsStacked" class="weights-stacked"></div>
         </div>
 
         <div class="answer-block">
-          <h3>Câu trả lời</h3>
-          <p id="answerText" class="answer-text"></p>
+          <div class="answer-header">
+            <h3>Câu trả lời</h3>
+            <button id="copyAnswer" class="btn-icon copy-btn" type="button" title="Copy">📋</button>
+          </div>
+          <div id="answerText" class="answer-card"></div>
         </div>
 
         <div class="passages-block">
-          <h3>Đoạn văn được truy hồi</h3>
+          <h3>Đoạn văn truy hồi</h3>
           <ol id="passagesList" class="passages-list"></ol>
         </div>
       </section>
 
+      <!-- Compare results -->
       <section class="panel compare-panel" id="comparePanel" hidden>
-        <h2>So sánh phương pháp fusion</h2>
+        <h2>⇄ So sánh phương pháp fusion</h2>
         <p class="hint">
-          Cùng một lượt truy hồi (dense/BM25/sparse) được fuse lại với trọng số khác nhau cho mỗi phương pháp.
-          Chỉ <strong>Dynamic MLP</strong> gọi LLM sinh câu trả lời — các baseline chỉ so sánh chất lượng truy hồi.
-          Đoạn văn trùng với top-5 của MLP được đánh dấu <span class="match-dot"></span>.
+          Một lượt truy hồi dùng chung — chỉ <strong>Dynamic MLP</strong> gọi LLM sinh câu trả lời.
+          Đoạn văn trùng top-5 MLP được đánh dấu <span class="match-dot"></span>.
         </p>
+        <div class="features-block compare-features-block">
+          <div class="block-head">
+            <h3>🧠 Router nhìn thấy gì</h3>
+            <span class="block-sub">Đặc trưng của truy vấn (dùng chung cho mọi phương pháp)</span>
+          </div>
+          <div id="compareFeatures" class="features-bars"></div>
+        </div>
         <div id="compareTable" class="compare-table"></div>
       </section>
     </main>
   </div>
+
+  <footer class="app-footer">
+    Dynamic Hybrid RAG for Vietnamese · <a href="https://github.com" target="_blank">GitHub</a>
+  </footer>
 
   <script src="/app.js"></script>
 </body>

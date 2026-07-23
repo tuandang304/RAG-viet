@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +25,10 @@ class RAGResult:
     weights: tuple[float, ...]            # (w_dense, w_bm25, w_sparse)
     retrieved: list[tuple[str, str, float]]   # (id, passage, fused_score)
     answer: str
+    # The 8 Vietnamese linguistic features the router saw (FEATURE_NAMES → value).
+    # Query-level, so identical across compare() methods. Empty when a neural
+    # extractor returns a differently-shaped vector (the API never uses one).
+    features: dict[str, float] = field(default_factory=dict)
 
 
 # Fixed-weight baselines from the paper, in (w_dense, w_bm25, w_sparse, w_toneless)
@@ -61,12 +65,22 @@ class RAGPipeline:
         self._neural_extractor = neural_extractor
         self._bm25_vocab: set[str] | None = bm25.vocab
 
-    def _predict_mlp_weights(self, query: str, hits: dict[str, list]) -> tuple[float, ...]:
-        features = extract_features(
+    def _predict_mlp_weights(
+        self, query: str, hits: dict[str, list]
+    ) -> tuple[tuple[float, ...], dict[str, float]]:
+        """Return (routing weights, linguistic-feature dict).
+
+        The feature dict maps the 8 FEATURE_NAMES → value so the API/UI can show
+        *what the router saw*. It carries only the linguistic features (not the
+        retrieval signals) and is empty when a neural extractor returns a
+        differently-shaped vector.
+        """
+        linguistic = extract_features(
             query,
             bm25_vocab=self._bm25_vocab,
             neural_extractor=self._neural_extractor,
         )
+        features = linguistic
         n_base = len(FEATURE_NAMES)
         if self._mlp.input_dim in (n_base + len(SIGNAL_NAMES), n_base + len(SIGNAL_NAMES_4WAY)):
             four_way = self._mlp.input_dim == n_base + len(SIGNAL_NAMES_4WAY)
@@ -79,7 +93,14 @@ class RAGPipeline:
                 ),
             )
             features = np.concatenate([features, signals])
-        return self._mlp.predict_weights(features)   # (a, b, c[, d])
+
+        weights = self._mlp.predict_weights(features)   # (a, b, c[, d])
+        feature_dict = (
+            {name: float(v) for name, v in zip(FEATURE_NAMES, linguistic, strict=True)}
+            if len(linguistic) == n_base
+            else {}
+        )
+        return weights, feature_dict
 
     def run(self, query: str) -> RAGResult:
         # Retrieve all channels first — fusion needs the hits anyway, and
@@ -89,7 +110,7 @@ class RAGPipeline:
             k_dense=settings.top_k_dense,
             k_bm25=settings.top_k_bm25,
         )
-        weights = self._predict_mlp_weights(query, hits)
+        weights, features = self._predict_mlp_weights(query, hits)
         retrieved = self._hybrid.fuse(hits, weights, k_final=settings.top_k_final)
 
         answer = ""
@@ -97,7 +118,9 @@ class RAGPipeline:
             passages = [p for _, p, _ in retrieved]
             answer = generate(query, passages)
 
-        return RAGResult(query=query, weights=weights, retrieved=retrieved, answer=answer)
+        return RAGResult(
+            query=query, weights=weights, retrieved=retrieved, answer=answer, features=features
+        )
 
     def compare(
         self,
@@ -122,7 +145,7 @@ class RAGPipeline:
             k_dense=settings.top_k_dense,
             k_bm25=settings.top_k_bm25,
         )
-        mlp_weights = self._predict_mlp_weights(query, hits)
+        mlp_weights, features = self._predict_mlp_weights(query, hits)
 
         results: dict[str, RAGResult] = {}
         for name, weights in methods.items():
@@ -134,7 +157,9 @@ class RAGPipeline:
                 passages = [p for _, p, _ in retrieved]
                 answer = generate(query, passages)
 
-            results[name] = RAGResult(query=query, weights=w, retrieved=retrieved, answer=answer)
+            results[name] = RAGResult(
+                query=query, weights=w, retrieved=retrieved, answer=answer, features=features
+            )
         return results
 
 

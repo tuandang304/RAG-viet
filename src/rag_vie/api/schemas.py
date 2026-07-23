@@ -17,6 +17,7 @@ class RetrievedPassage(BaseModel):
 class QueryResponse(BaseModel):
     query: str
     weights: dict[str, float]
+    features: dict[str, float] = {}   # 8 Vietnamese linguistic features (router input)
     retrieved: list[RetrievedPassage]
     answer: str
     latency_ms: float
@@ -34,6 +35,7 @@ class MethodResult(BaseModel):
 
 class CompareResponse(BaseModel):
     query: str
+    features: dict[str, float] = {}   # query-level, shared across all methods
     methods: list[MethodResult]
     latency_ms: float
     index_dir: str

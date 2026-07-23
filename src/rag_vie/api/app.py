@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from ..config import settings
+from ..pipeline import BASELINE_METHODS
 from .schemas import (
     CompareResponse,
     HealthResponse,
@@ -34,7 +35,13 @@ _METHOD_LABELS = {
     "dense": "Dense only",
     "bm25": "BM25 only",
     "sparse": "Sparse only (BGE-M3)",
+    "toneless": "Toneless only (bỏ dấu)",
 }
+
+# UI-only compare set: the paper's fixed baselines plus a single-channel toneless
+# baseline so the 4th channel is comparable in the table. BASELINE_METHODS itself
+# is left untouched so offline evaluate_all.py semantics don't drift.
+_UI_COMPARE_METHODS = {**BASELINE_METHODS, "toneless": (0.0, 0.0, 0.0, 1.0)}
 
 app = FastAPI(title="RAG_vie — Testing UI", version="0.1.0")
 
@@ -85,6 +92,7 @@ def run_query(req: QueryRequest) -> QueryResponse:
     return QueryResponse(
         query=result.query,
         weights=dict(zip(CHANNEL_LABELS, result.weights, strict=False)),
+        features=result.features,
         retrieved=[
             RetrievedPassage(id=pid, passage=passage, score=score)
             for pid, passage, score in result.retrieved
@@ -105,10 +113,13 @@ def compare_methods(req: QueryRequest) -> CompareResponse:
 
     start = time.perf_counter()
     try:
-        results = pipeline.compare(req.query)
+        results = pipeline.compare(req.query, methods=_UI_COMPARE_METHODS)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Lỗi khi chạy pipeline: {exc}") from exc
     latency_ms = (time.perf_counter() - start) * 1000
+
+    # Features are query-level (identical across methods) — take from any result.
+    features = next(iter(results.values())).features if results else {}
 
     methods = [
         MethodResult(
@@ -126,6 +137,7 @@ def compare_methods(req: QueryRequest) -> CompareResponse:
 
     return CompareResponse(
         query=req.query,
+        features=features,
         methods=methods,
         latency_ms=round(latency_ms, 1),
         index_dir=index_dir,

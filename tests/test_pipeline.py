@@ -3,6 +3,7 @@ import pytest
 
 import rag_vie.pipeline as pipeline_mod
 import rag_vie.retrieval.hybrid as hybrid_mod
+from rag_vie.features.vietnamese import FEATURE_NAMES
 from rag_vie.pipeline import BASELINE_METHODS, RAGPipeline
 
 
@@ -51,6 +52,22 @@ def test_run_uses_mlp_weights_and_generates():
     assert result.weights == (0.5, 0.3, 0.2, 0.0)
     assert result.answer == "answer for query"
     assert len(result.retrieved) > 0
+
+
+def test_run_surfaces_all_linguistic_features():
+    pipeline = _make_pipeline()
+    result = pipeline.run("query")
+    # The router's 8 linguistic features are exposed for the UI to explain routing.
+    assert set(result.features) == set(FEATURE_NAMES)
+    assert all(isinstance(v, float) for v in result.features.values())
+
+
+def test_compare_shares_query_level_features_across_methods():
+    pipeline = _make_pipeline()
+    results = pipeline.compare("query")
+    feats = [tuple(sorted(r.features.items())) for r in results.values()]
+    assert all(f == feats[0] for f in feats)          # identical across methods
+    assert set(results["mlp"].features) == set(FEATURE_NAMES)
 
 
 def test_compare_covers_all_baselines_with_fixed_weights():
